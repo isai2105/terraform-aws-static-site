@@ -1,0 +1,67 @@
+# THROWAWAY. Prints the claims GitHub actually puts in an Actions OIDC token,
+# so the trust policies in bootstrap/oidc.tf are written against an observed
+# subject rather than a guessed one. Never merged, deleted with its branch.
+name: oidc-claim-probe
+
+on:
+  push:
+    branches: ['probe/**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ref-claim:
+    name: ref-claim
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Print the OIDC claims
+        run: |
+          resp="$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")"
+          jwt="$(printf '%s' "$resp" | jq -r '.value')"
+          b64="$(printf '%s' "$jwt" | cut -d. -f2 | tr '_-' '/+')"
+          case $(( ${#b64} % 4 )) in
+            2) b64="${b64}==" ;;
+            3) b64="${b64}=" ;;
+            *) ;;
+          esac
+          printf '%s' "$b64" | base64 -d | jq '{
+            sub, aud, repository, repository_id,
+            repository_owner, repository_owner_id,
+            ref, environment, event_name, job_workflow_ref
+          }'
+
+  environment-claim:
+    name: environment-claim
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: oidc-claim-probe
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Print the OIDC claims
+        run: |
+          resp="$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")"
+          jwt="$(printf '%s' "$resp" | jq -r '.value')"
+          b64="$(printf '%s' "$jwt" | cut -d. -f2 | tr '_-' '/+')"
+          case $(( ${#b64} % 4 )) in
+            2) b64="${b64}==" ;;
+            3) b64="${b64}=" ;;
+            *) ;;
+          esac
+          printf '%s' "$b64" | base64 -d | jq '{
+            sub, aud, repository, repository_id,
+            repository_owner, repository_owner_id,
+            ref, environment, event_name, job_workflow_ref
+          }'
