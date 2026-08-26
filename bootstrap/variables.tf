@@ -74,3 +74,65 @@ variable "github_repository" {
     error_message = "The github_repository must be a valid GitHub repository name: letters, digits, dots, hyphens and underscores, 100 characters or fewer."
   }
 }
+
+# The two numeric GitHub IDs the immutable subject format embeds.
+#
+# They are typed as strings rather than numbers because that is what they are:
+# the value in the token's `sub` claim is text, and a trust policy compares it
+# as text. Typing them as numbers would invite Terraform's number formatting
+# into the middle of a string that has to match byte for byte.
+#
+# Both are public facts about a public repository, which is what allows them to
+# live in the committed tfvars beside this file. Regenerate them for a fork with:
+#
+#   gh api repos/$OWNER/$REPO --jq '{owner: .owner.id, repo: .id}'
+
+variable "github_owner_id" {
+  description = "Numeric id of the GitHub account in github_owner. Embedded in the OIDC subject that the CI trust policies match, and not interchangeable with the account name."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "The github_owner_id must be the numeric account id, digits only. Read it with: gh api repos/<owner>/<repo> --jq .owner.id"
+  }
+}
+
+variable "github_repository_id" {
+  description = "Numeric id of this repository. Embedded in the OIDC subject that the CI trust policies match."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repository_id))
+    error_message = "The github_repository_id must be the numeric repository id, digits only. Read it with: gh api repos/<owner>/<repo> --jq .id"
+  }
+}
+
+variable "environments" {
+  description = <<-EOT
+    Names of the environments this repository deploys. Each one becomes a state
+    key in the state bucket, a value in the apply role's trusted-subject list,
+    and a GitHub Environment of the same name. Adding an environment is an edit
+    here plus a re-apply of this root; the apply role cannot be assumed from an
+    environment that is not in this list.
+  EOT
+  type        = list(string)
+
+  validation {
+    condition     = length(var.environments) > 0
+    error_message = "At least one environment is required; with an empty list the apply role would trust no subject and could never be assumed."
+  }
+
+  # The names appear verbatim in an OIDC subject, in an S3 key and in a GitHub
+  # Environment name. Restricting them to the intersection of what all three
+  # accept costs nothing and removes a class of mismatch that only shows up at
+  # AssumeRoleWithWebIdentity.
+  validation {
+    condition     = alltrue([for e in var.environments : can(regex("^[a-z][a-z0-9-]*$", e))])
+    error_message = "Each environment name must be lower case letters, digits and hyphens, starting with a letter."
+  }
+
+  validation {
+    condition     = length(distinct(var.environments)) == length(var.environments)
+    error_message = "Environment names must be unique."
+  }
+}
