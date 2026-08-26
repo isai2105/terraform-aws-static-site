@@ -197,7 +197,12 @@ lint: check-tflint ## Lint every directory holding .tf files with TFLint and the
 # compiled in and otherwise pulls a newer bundle from ghcr.io on every run,
 # which would mean an unchanged commit could start failing on a Tuesday, and
 # would make the scan depend on a registry being reachable. With it, the pin
-# above fixes the scanner and the rules together.
+# above fixes the scanner and the rules together. On a machine with no Trivy
+# cache — every CI runner — this prints "Falling back to embedded checks" at
+# ERROR level. That line is the intended path, not a failure: the embedded
+# checks are the ones this version was built with, and they produce the same
+# findings the downloadable bundle does. Re-check that when TRIVY_VERSION is
+# bumped.
 scan: check-trivy ## Scan every Terraform file for misconfigurations with Trivy.
 	trivy config . \
 		--exit-code 1 \
