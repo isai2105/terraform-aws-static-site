@@ -14,3 +14,10 @@ name_prefix = "isai2105"
 project           = "terraform-aws-static-site"
 github_owner      = "isai2105"
 github_repository = "terraform-aws-static-site"
+
+# Public facts about a public repository, read with:
+#   gh api repos/isai2105/terraform-aws-static-site --jq '{owner: .owner.id, repo: .id}'
+github_owner_id      = "22457760"
+github_repository_id = "1347510042"
+
+environments = ["stage", "prod"]
