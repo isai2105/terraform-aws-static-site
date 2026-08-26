@@ -10,5 +10,6 @@ tfdestroy
 secrets.tfvars
 backend.hcl
 tradeoffs.md
+EXECUTION_PLAN.md
 !example.tfvars
 !envs/*/terraform.tfvars
