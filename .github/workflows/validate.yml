@@ -1,9 +1,10 @@
 # Validation that runs on every pull request.
 #
-# Three jobs, none of which needs an AWS account, a role or a state bucket:
-# the Terraform job runs `init -backend=false`, and the other two never touch
-# a cloud provider at all. That is what lets this gate land before the code it
-# gates, and what keeps it fast enough to be a required check.
+# Four jobs, none of which needs an AWS account, a role or a state bucket: the
+# Terraform job runs `init -backend=false`, TFLint runs with the AWS ruleset's
+# deep-check rules off, and the other two never touch a cloud provider at all.
+# That is what lets this gate land before the code it gates, and what keeps it
+# fast enough to be a required check.
 #
 # Every third-party action is pinned by commit SHA — a tag can be moved, a
 # commit cannot.
@@ -50,6 +51,40 @@ jobs:
 
       - name: Check formatting and validate
         run: make fmt-check validate
+
+  # Everything `terraform validate` has no opinion about: deprecated syntax,
+  # instance types that do not exist, declarations nobody reads, names in the
+  # wrong case. The AWS ruleset's deep-check rules — the only ones that would
+  # call an AWS API — are off by default and left off, so this job needs no
+  # account, no role and no credentials either.
+  tflint:
+    name: tflint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the pinned TFLint version
+        id: tflint-version
+        # The Makefile is the pin; repeating the number here would let the
+        # binary CI installs and the version the Makefile's guard demands
+        # drift apart, and the guard would then fail every run.
+        run: echo "version=$(make -s print-tflint-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install TFLint
+        uses: terraform-linters/setup-tflint@6e1e0642c0289bd619021bf6b34e3c08ed1e005a # v6.3.0
+        with:
+          tflint_version: v${{ steps.tflint-version.outputs.version }}
+
+      - name: Lint
+        env:
+          # `tflint --init` downloads the AWS ruleset from the GitHub API,
+          # which is rate-limited to 60 requests an hour for anonymous callers
+          # sharing a runner's IP. The default token lifts that; it is
+          # read-only here, per the top-level `permissions`.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make lint
 
   # Workflow syntax, expression errors and — through shellcheck — bugs in the
   # `run:` blocks above. This is what keeps the hardening of these workflows
