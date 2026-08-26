@@ -1,0 +1,35 @@
+# Trivy suppressions — deliberately empty.
+#
+# An entry here does not make a finding go away; it records that someone read
+# the finding, understood what it costs, and decided to accept it anyway. The
+# file exists to make that decision legible in review and in `git log`, not to
+# quiet a scanner that has become inconvenient. Silencing a check without that
+# reasoning written down turns `make scan` back into decoration.
+#
+# Every entry is therefore three lines: the justification, the expiry, and the
+# ID. Both comment lines are required.
+#
+#   - Justification: why this specific finding is accepted here — the control
+#     that compensates for it, or the reason the check does not apply to this
+#     resource. "Noisy", "false positive" and "not now" are not justifications.
+#   - Expiry: `expires: YYYY-MM-DD` when the acceptance is temporary — waiting
+#     on an upstream fix, a migration, a provider release. `expires: never`
+#     when it is permanent, which should be rare and should be argued for.
+#   - ID: one AVD check ID per line, `AVD-AWS-0000` or the short `AWS-0000`.
+#     Trivy prints the ID with every finding.
+#
+# For example:
+#
+#   # Access logs for this bucket go to CloudTrail data events instead, so
+#   # per-bucket S3 server access logging would duplicate them at extra cost.
+#   # expires: never
+#   AVD-AWS-0089
+#
+# Prefer a narrower fix to an entry here. An `#trivy:ignore:AVD-AWS-0000`
+# comment on the resource in the .tf file scopes the suppression to the one
+# resource that needs it, instead of to the whole repository, and it sits
+# where the next reader of that resource will see it.
+#
+# There are no entries today: this repository holds no Terraform yet, and the
+# intent is that it never acquires one without an argument in the pull request
+# that adds it.

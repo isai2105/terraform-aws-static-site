@@ -4,10 +4,10 @@
 # calls these exact targets rather than open-coding the commands, so the two
 # invocation paths cannot drift apart.
 #
-# Only the targets that work today ship here. `scan`, `test` and the
-# per-environment plan/apply/destroy targets arrive with the commits that add
-# the thing each one drives — a target that does not work yet is
-# indistinguishable from one that is broken.
+# Only the targets that work today ship here. `test` and the per-environment
+# plan/apply/destroy targets arrive with the commits that add the thing each
+# one drives — a target that does not work yet is indistinguishable from one
+# that is broken.
 
 # Bash rather than /bin/sh, with `-e -u -o pipefail`, so a command that fails
 # inside a loop or a pipeline fails the target instead of being swallowed.
@@ -32,7 +32,21 @@ TFLINT_VERSION := 0.64.0
 # version, no naming rule. The path has to be absolute.
 TFLINT_CONFIG := $(CURDIR)/.tflint.hcl
 
-.PHONY: help check-terraform check-tflint print-tflint-version fmt fmt-check validate lint
+# Trivy likewise has no version file of its own, so this is the pin and
+# validate.yml reads it back through `print-trivy-version`. Pinning it is what
+# makes `scan` reproducible in a second sense as well: `--skip-check-update`
+# below runs the checks compiled into this exact binary, so the release number
+# fixes the rules as well as the scanner.
+TRIVY_VERSION := 0.74.0
+
+# Absolute for the same reason as TFLINT_CONFIG: Trivy resolves --ignorefile
+# against the working directory, so a relative path would quietly resolve to
+# nothing the moment `scan` is invoked from anywhere but the repository root.
+TRIVY_IGNOREFILE := $(CURDIR)/.trivyignore
+
+.PHONY: help fmt fmt-check validate lint scan \
+	check-terraform check-tflint check-trivy \
+	print-tflint-version print-trivy-version
 
 help: ## Show the available targets.
 	@echo "Usage: make <target>"
@@ -43,6 +57,7 @@ help: ## Show the available targets.
 	@echo
 	@echo "terraform pinned by .terraform-version: $(TERRAFORM_VERSION)"
 	@echo "tflint pinned by this Makefile:         $(TFLINT_VERSION)"
+	@echo "trivy pinned by this Makefile:          $(TRIVY_VERSION)"
 
 # Internal guard, deliberately absent from `help`: not a check in its own right,
 # but a prerequisite of every target that shells out to terraform. Running a
@@ -92,10 +107,40 @@ check-tflint:
 		exit 1; \
 	fi
 
+# And the same guard again for trivy, where the stakes are higher still: the
+# check IDs are compiled into the binary, so an unpinned trivy silently changes
+# which misconfigurations this repository considers unacceptable. A scan that
+# passes because the binary is older than the rule is worse than no scan.
+check-trivy:
+	@if ! command -v trivy >/dev/null 2>&1; then \
+		echo "make: trivy was not found on PATH." >&2; \
+		echo "      this repository pins trivy $(TRIVY_VERSION)." >&2; \
+		echo "      install it with:  brew install trivy" >&2; \
+		echo "                   or:  from https://github.com/aquasecurity/trivy/releases/tag/v$(TRIVY_VERSION)" >&2; \
+		exit 1; \
+	fi; \
+	out="$$(trivy --version)"; \
+	actual="$${out%%$$'\n'*}"; \
+	actual="$${actual#Version: }"; \
+	if [ "$$actual" != "$(TRIVY_VERSION)" ]; then \
+		echo "make: trivy version mismatch." >&2; \
+		echo "      expected $(TRIVY_VERSION)  (pinned in the Makefile)" >&2; \
+		echo "      found    $$actual  ($$(command -v trivy))" >&2; \
+		echo "      trivy has no version manager, so pick the matching build:" >&2; \
+		echo "        brew upgrade trivy   (when the formula is at $(TRIVY_VERSION))" >&2; \
+		echo "        https://github.com/aquasecurity/trivy/releases/tag/v$(TRIVY_VERSION)" >&2; \
+		exit 1; \
+	fi
+
 # Also internal: the one place validate.yml can ask which tflint this
 # repository pins, so the workflow and the guard cannot disagree.
 print-tflint-version:
 	@echo "$(TFLINT_VERSION)"
+
+# The same for trivy: validate.yml installs whatever this prints, so the
+# installed binary and the version check-trivy demands are the same number.
+print-trivy-version:
+	@echo "$(TRIVY_VERSION)"
 
 # Formatting is purely textual, so it is correct from the repository root and
 # recursive: no per-directory initialisation is involved. `terraform fmt` skips
@@ -135,3 +180,27 @@ validate: check-terraform ## Init (-backend=false) and validate every directory 
 lint: check-tflint ## Lint every directory holding .tf files with TFLint and the AWS ruleset.
 	tflint --init --config "$(TFLINT_CONFIG)"
 	tflint --recursive --config "$(TFLINT_CONFIG)"
+
+# The security gate, and the one check here that can be a no-op without ever
+# looking like one: `trivy config` exits 0 on findings unless told otherwise,
+# so --exit-code 1 is not a preference, it is the whole point of the target.
+# Config mode reads HCL statically — no plan, no state, no provider, no AWS
+# call — which is what lets it run on a pull request from a fork.
+#
+# --severity is spelled out in full rather than left to the default so that an
+# upstream change to that default cannot quietly raise the bar for what counts
+# as a failure. Everything fails the build, UNKNOWN included: there are no
+# findings to grandfather in today, and accepting one later should cost a
+# reviewed entry in .trivyignore rather than nothing at all.
+#
+# --skip-check-update pins the rules to the binary. Trivy ships its checks
+# compiled in and otherwise pulls a newer bundle from ghcr.io on every run,
+# which would mean an unchanged commit could start failing on a Tuesday, and
+# would make the scan depend on a registry being reachable. With it, the pin
+# above fixes the scanner and the rules together.
+scan: check-trivy ## Scan every Terraform file for misconfigurations with Trivy.
+	trivy config . \
+		--exit-code 1 \
+		--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+		--ignorefile "$(TRIVY_IGNOREFILE)" \
+		--skip-check-update

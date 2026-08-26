@@ -1,10 +1,10 @@
 # Validation that runs on every pull request.
 #
-# Four jobs, none of which needs an AWS account, a role or a state bucket: the
+# Five jobs, none of which needs an AWS account, a role or a state bucket: the
 # Terraform job runs `init -backend=false`, TFLint runs with the AWS ruleset's
-# deep-check rules off, and the other two never touch a cloud provider at all.
-# That is what lets this gate land before the code it gates, and what keeps it
-# fast enough to be a required check.
+# deep-check rules off, Trivy reads the HCL statically, and the other two never
+# touch a cloud provider at all. That is what lets this gate land before the
+# code it gates, and what keeps it fast enough to be a required check.
 #
 # Every third-party action is pinned by commit SHA — a tag can be moved, a
 # commit cannot.
@@ -85,6 +85,50 @@ jobs:
           # read-only here, per the top-level `permissions`.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: make lint
+
+  # Misconfiguration in the infrastructure itself, which neither `terraform
+  # validate` nor TFLint has an opinion about: a bucket without encryption, a
+  # policy with a wildcard principal, a role anyone can assume. It lands now
+  # rather than later because the next thing written here is bootstrap/ — an S3
+  # bucket and two IAM roles — and that is the code most worth scanning as it is
+  # written. `trivy config` parses HCL statically, so like the jobs above it
+  # reaches no AWS API and needs no credentials.
+  #
+  # tfsec was folded into Trivy in 2023 and is unmaintained; Trivy is the
+  # supported successor and kept the AVD check IDs, so the IDs in .trivyignore
+  # mean the same thing they always did.
+  trivy:
+    name: trivy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the pinned Trivy version
+        id: trivy-version
+        # As with TFLint: the Makefile is the pin. Repeating the number here
+        # would let the binary CI installs drift from the version the
+        # Makefile's guard demands, and the guard would fail every run.
+        run: echo "version=$(make -s print-trivy-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Trivy
+        # The installer only, not aquasecurity/trivy-action: the action would
+        # take the scan's flags as `with:` inputs, which is a second copy of
+        # the invocation that `make scan` already owns. Installing the binary
+        # and calling the target keeps CI and a local shell running the same
+        # command, which is the rule the Makefile is built around.
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v${{ steps.trivy-version.outputs.version }}
+
+      # No GITHUB_TOKEN here, unlike the TFLint job: `make scan` passes
+      # --skip-check-update, so Trivy runs the checks compiled into the pinned
+      # binary and pulls neither the checks bundle from ghcr.io nor the
+      # vulnerability database, which config mode does not use at all. The
+      # scan makes no network call, so there is no rate limit to lift.
+      - name: Scan
+        run: make scan
 
   # Workflow syntax, expression errors and — through shellcheck — bugs in the
   # `run:` blocks above. This is what keeps the hardening of these workflows
