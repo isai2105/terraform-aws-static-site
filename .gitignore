@@ -1,0 +1,14 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+crash.log
+*.tfplan
+*.tfplan.*
+tfdestroy
+*.auto.tfvars
+secrets.tfvars
+backend.hcl
+tradeoffs.md
+!example.tfvars
+!envs/*/terraform.tfvars
