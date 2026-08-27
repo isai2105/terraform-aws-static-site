@@ -25,9 +25,9 @@
 # that reads as an oversight if the argument is not sitting next to it.
 #
 # The gate set mirrored here is the one that exists at this commit: terraform
-# fmt and validate, tflint, trivy, terraform-docs and actionlint. `zizmor` joins
-# validate.yml later and joins this file in the same commit, rather than being
-# left to drift in behind it.
+# fmt and validate, the module tests, tflint, trivy, terraform-docs and
+# actionlint. `zizmor` joins validate.yml later and joins this file in the same
+# commit, rather than being left to drift in behind it.
 
 repos:
   # -------------------------------------------------------------------------
@@ -99,7 +99,7 @@ repos:
   # than only in the Makefile, because a hook fires on its own where a target is
   # typed on purpose.
   #
-  # None of these five reaches an AWS account, and that is now true on a working
+  # None of these six reaches an AWS account, and that is now true on a working
   # copy and not only on a fresh checkout. It was not, when this file was first
   # written: `init -backend=false` re-uses a backend a previous `make
   # plan-<env>` recorded, initialising an S3 backend validates credentials
@@ -119,13 +119,14 @@ repos:
   #
   # The cost, named because everything here costs something: these run
   # repository-wide rather than on the changed directory, so the whole set takes
-  # about thirteen seconds regardless of what was touched, eleven of which is
-  # `validate` initialising seven directories. Per-directory scoping is the one
-  # thing pre-commit-terraform genuinely offers, and it is not worth a check
-  # that disagrees with CI. `files:` still decides whether a hook runs at all,
-  # so a commit touching no Terraform pays none of it.
+  # about seventeen seconds regardless of what was touched — eleven of which is
+  # `validate` initialising seven directories, and three `test` initialising the
+  # module and planning it six times. Per-directory scoping is the one thing
+  # pre-commit-terraform genuinely offers, and it is not worth a check that
+  # disagrees with CI. `files:` still decides whether a hook runs at all, so a
+  # commit touching no Terraform pays none of it.
   #
-  # `pass_filenames: false` on all five: the targets discover their own targets,
+  # `pass_filenames: false` on all six: the targets discover their own targets,
   # and appending a list of changed files to `make fmt` would ask make to build
   # a goal named after a .tf file.
   - repo: local
@@ -141,11 +142,11 @@ repos:
       # the installed binary moved with it. Every hook here triggers on the
       # Makefile for the same reason, that being where the other three pins are.
       #
-      # `.tftest.hcl` is in the pattern because `terraform fmt` formats it, not
-      # because any exists yet. When the module tests land they bring a `make
-      # test` target, and its hook belongs in that same diff — the rule this
-      # file already applies to `zizmor`. A test suite whose local gate arrives
-      # a commit later is a suite that was ungated for a commit.
+      # `.tftest.hcl` is in the pattern because `terraform fmt` formats it,
+      # which it does whether or not anything runs the tests. The `make test`
+      # hook below landed in the same diff as the tests themselves — the rule
+      # this file already applies to `zizmor`, because a test suite whose local
+      # gate arrives a commit later is a suite that was ungated for a commit.
       - id: terraform-fmt
         name: terraform fmt
         entry: make fmt
@@ -196,6 +197,23 @@ repos:
         pass_filenames: false
         files: ^modules/.*(\.tf|/README\.md)$|^\.terraform-docs\.yml$|^Makefile$
         exclude: /examples/
+
+      # Widest trigger of the six, and it matches the target rather than the
+      # module that happens to hold the tests today: `make test` discovers every
+      # directory a `.tftest.hcl` belongs to, so the hook fires on any Terraform
+      # change rather than on `^modules/` alone. A test root added outside
+      # modules/ would otherwise be covered by the target and by nothing here.
+      #
+      # The false positives that buys — a change under envs/ or bootstrap/ runs
+      # a suite that cannot be affected by it — cost about three seconds, which
+      # is less than the cost of noticing, a year from now, that the trigger and
+      # the target had disagreed since the day a second test root appeared.
+      - id: terraform-test
+        name: terraform test
+        entry: make test
+        language: system
+        pass_filenames: false
+        files: \.(tf|tfvars)$|\.tftest\.hcl$|\.terraform\.lock\.hcl$|^\.terraform-version$|^Makefile$
 
   # -------------------------------------------------------------------------
   # actionlint — the one check here that is not a Makefile target.

@@ -6,12 +6,12 @@
 #
 # Only the targets that work today ship here — a target that does not work yet
 # is indistinguishable from one that is broken. The stage and prod targets each
-# arrived with the commit that created the directory they point at; `test`
-# arrives with the module tests.
+# arrived with the commit that created the directory they point at, and `test`
+# arrived with the module tests.
 #
-# The file is in two halves. Everything down to `docs-check` is a check: it
-# reaches no AWS account, needs no credentials, and is safe to require on a pull
-# request. Everything after it talks to AWS.
+# The file is in two halves. Everything down to `test` is a check: it reaches no
+# AWS account, needs no credentials, and is safe to require on a pull request.
+# Everything after it talks to AWS.
 
 # Bash rather than /bin/sh, with `-e -u -o pipefail`, so a command that fails
 # inside a loop or a pipeline fails the target instead of being swallowed.
@@ -89,7 +89,7 @@ TERRAFORM_DOCS_VERSION := 0.24.0
 # it — a different table, generated in silence.
 TERRAFORM_DOCS_CONFIG := $(CURDIR)/.terraform-docs.yml
 
-.PHONY: help fmt fmt-check validate lint scan docs docs-check \
+.PHONY: help fmt fmt-check validate lint scan docs docs-check test \
 	plan-stage apply-stage destroy-stage \
 	plan-prod apply-prod destroy-prod \
 	check-terraform check-tflint check-trivy check-terraform-docs \
@@ -449,6 +449,43 @@ docs: check-terraform-docs ## Regenerate the terraform-docs block in every modul
 
 docs-check: check-terraform-docs ## Fail if any module README's generated block is out of date.
 	$(call terraform_docs,--output-check)
+
+# The module's own tests, and the last target above the AWS boundary below.
+#
+# Targets are discovered rather than listed, for the third time and the same
+# reason `validate` and the documentation targets give: a list written against
+# the modules that have tests today stops covering the ones added tomorrow. Each
+# `.tftest.hcl` is mapped back to the root it tests — the directory holding it,
+# or its parent when that directory is the conventional `tests/` — because
+# `terraform test` runs from the module, not from the test file.
+#
+# `init -backend=false` for the same reason it appears in `validate`: it
+# configures no remote state, so this needs no bucket and no role. Unlike
+# `validate` there is no recorded backend to remove first — a module is never a
+# plan target, so nothing here has ever been initialised against S3.
+#
+# The claim that matters, because it is what makes this a required check rather
+# than an environment target: this reaches no AWS account either. That is not a
+# property of `terraform test`, which configures the provider like any other
+# command and fails with an STS InvalidClientTokenId before the first assertion
+# on a machine with an expired session. It is a property of how the test files
+# configure their providers, and the argument is at the top of
+# modules/static-site/tests/plan.tftest.hcl rather than restated here. Verified
+# with no HOME, no AWS environment variables and every outbound HTTP request
+# black-holed.
+test: check-terraform ## Run the module tests with `terraform test`.
+	@dirs="$$(find . -type d -name .terraform -prune -o -type f -name '*.tftest.hcl' -print \
+		| sed -e 's|/[^/]*$$||' -e 's|/tests$$||' \
+		| sort -u)"; \
+	if [ -z "$$dirs" ]; then \
+		echo "no .tftest.hcl files found; nothing to test"; \
+		exit 0; \
+	fi; \
+	while IFS= read -r dir; do \
+		echo "==> $$dir"; \
+		terraform -chdir="$$dir" init -backend=false -input=false; \
+		terraform -chdir="$$dir" test; \
+	done <<< "$$dirs"
 
 # ---------------------------------------------------------------------------
 # The environment targets

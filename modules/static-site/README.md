@@ -278,14 +278,46 @@ roughly $600 a month and buys support for clients that predate SNI.
 > hand.** Every environment here leaves `domain_name` null, so nothing exercises
 > DNS validation, a certificate/alias mismatch, or ACM's deletion lag against
 > real AWS. The variable rules and the conditional wiring are checked at plan
-> time and that is the whole of it. Treating a plan-time check as coverage of
-> DNS validation would be worse than saying plainly that it is not.
+> time — by the suite described below, which is why this path has tests at all
+> when no environment uses it — and that is the whole of it. Treating a
+> plan-time check as coverage of DNS validation would be worse than saying
+> plainly that it is not.
 
 Destroying it has one documented sharp edge: a certificate deletion can fail
 with `ResourceInUseException` *after* its distribution is already gone, because
 the association lingers cross-service. The provider retries for 20 minutes and
 then gives up. Re-running `terraform destroy` is the fix, and a certificate left
 in `PENDING_VALIDATION` is on the post-destroy checklist for the same reason.
+
+## What a plan can establish, and what it cannot
+
+`make test` runs `tests/plan.tftest.hcl` with native `terraform test`: six run
+blocks, every one of them `command = plan`, against the real AWS provider and
+no AWS account. The provider configurations in the test file hold credentials
+that cannot reach AWS and skip the STS call the provider otherwise makes when
+it is configured, which is what makes this a `validate.yml` job like the
+others — required on every pull request, including one from a fork.
+
+What it holds:
+
+- the bucket is private in all five ways it can stop being — the four public
+  access block settings, and ACLs disabled outright by `BucketOwnerEnforced`
+- both the 403 and the 404 origin response map to `/index.html` with a 200 and
+  no edge caching, and `default_root_object` is `index.html`
+- each cache behaviour carries the cache policy and the response headers policy
+  meant for it, `/assets/*` included. The two are built from one map so the
+  security headers cannot drift apart; this is what checks the other end of
+  that wiring, where a behaviour can still be pointed at the wrong key
+- the module plans with no domain, with a domain and a managed certificate, and
+  with a domain and a supplied one — and both directions of the
+  domain/certificate-source rule are refused at plan time
+- the certificate is requested through `aws.us_east_1` and the bucket is not,
+  which is the one part of the custom-domain path a plan can genuinely catch
+
+What it cannot: anything a live request answers. The SPA mapping's known gap
+above, whether a response headers policy's headers survive a forwarded S3 403,
+DNS validation — none of these has a plan-time shadow, and the end-to-end
+workflow is the first thing here that makes a real request.
 
 ## What this module does not do yet
 
