@@ -157,6 +157,36 @@ fmt-check: check-terraform ## Fail if any Terraform file is not canonically form
 # of this repository never holds a .tf file at all. `init -backend=false`
 # configures no remote state, so this needs no bucket, no role and no AWS
 # credentials — which is what makes it safe as a required check.
+#
+# One class of directory is skipped, and it is skipped because Terraform cannot
+# do what this target asks of it rather than because checking would be
+# inconvenient. A module declaring `configuration_aliases` is stating that it
+# takes provider configurations from whoever calls it. Initialised as a root
+# there is no caller, so those providers are declared and never configured, and
+# `validate` fails on every resource using one with "Provider configuration not
+# present" — an error about the invocation, not about the code.
+#
+# Such a directory is validated through the roots that call it: the environments
+# under envs/ pass the providers in, and the module is loaded, type-checked and
+# validated as part of validating them. The example root beside each module is
+# what provides that caller before the environments exist. TFLint and Trivy read
+# these directories directly and are unaffected — neither needs a provider to be
+# configured.
+#
+# The test below matches the HCL argument rather than the word: anchored to the
+# start of a line and requiring the `=`, so it cannot be tripped by a comment
+# discussing `configuration_aliases`, which is how the first version of this
+# skipped the example root that exists to defeat it.
+#
+# A skip on its own would be a hole in a required check, and that is the whole
+# reason for the second pass below. "Validated through its callers" is a claim,
+# and nothing so far makes it true: a module added with `configuration_aliases`
+# and no caller would drop silently out of this target, print a reassuring line,
+# and exit 0 having been type-checked by nothing. That is exactly the failure
+# discovery was designed to prevent, reintroduced one directory at a time. So
+# every skipped directory has to produce a caller — an `examples/<name>/` root
+# beside it, which the first pass validated like any other root — and this target
+# fails if one does not. The claim and its evidence land together or not at all.
 validate: check-terraform ## Init (-backend=false) and validate every directory holding .tf files.
 	@dirs="$$(find . -type d -name .terraform -prune -o -type f -name '*.tf' -print \
 		| sed 's|/[^/]*$$||' \
@@ -165,11 +195,35 @@ validate: check-terraform ## Init (-backend=false) and validate every directory 
 		echo "no directories with .tf files found; nothing to validate"; \
 		exit 0; \
 	fi; \
+	skipped=(); \
 	while IFS= read -r dir; do \
+		if grep -Eq '^[[:space:]]*configuration_aliases[[:space:]]*=' "$$dir"/*.tf 2>/dev/null; then \
+			echo "==> $$dir (child module — validated through its callers)"; \
+			skipped+=("$$dir"); \
+			continue; \
+		fi; \
 		echo "==> $$dir"; \
 		terraform -chdir="$$dir" init -backend=false -input=false; \
 		terraform -chdir="$$dir" validate; \
-	done <<< "$$dirs"
+	done <<< "$$dirs"; \
+	uncovered=(); \
+	for dir in $${skipped[@]+"$${skipped[@]}"}; do \
+		if ! compgen -G "$$dir/examples/*/*.tf" >/dev/null; then \
+			uncovered+=("$$dir"); \
+		fi; \
+	done; \
+	if [ $${#uncovered[@]} -gt 0 ]; then \
+		echo "" >&2; \
+		echo "make: validate skipped these child modules but found no caller to validate them through:" >&2; \
+		printf '        %s\n' "$${uncovered[@]}" >&2; \
+		echo "" >&2; \
+		echo "      A module declaring configuration_aliases cannot be validated as a root," >&2; \
+		echo "      so it is only ever type-checked through a root that calls it. Without one" >&2; \
+		echo "      it is covered by nothing and this check would pass on unvalidated HCL." >&2; \
+		echo "      Add an examples/<name>/ root beside the module that calls it and passes" >&2; \
+		echo "      its providers in." >&2; \
+		exit 1; \
+	fi
 
 # TFLint needs no init per directory and no backend, so unlike `validate` it
 # discovers its own targets: `--recursive` descends from the root and simply

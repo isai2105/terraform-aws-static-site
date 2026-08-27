@@ -131,6 +131,26 @@ locals {
   # destroys with the environment it grants access to. Named, not wildcarded
   # across IAM: this is the only role either CI identity may touch.
   app_deploy_role_arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/react-cloudfront-app-deploy-*"
+
+  # The log groups CloudFront access logs are delivered into.
+  #
+  # Pinned to us-east-1 rather than to var.aws_region, and that is a property of
+  # CloudFront rather than a choice made here: CloudFront is a global service
+  # whose standard logging (v2) control plane answers only in us-east-1, so the
+  # delivery source, delivery destination and delivery are us-east-1 resources
+  # whatever region the environment lives in — and a CloudWatch Logs destination
+  # has to be in the same region as the delivery destination that names it.
+  # Scoping this grant to var.aws_region would deny the one region the module can
+  # legally use.
+  #
+  # The `/aws/vendedlogs/` prefix is the one AWS keeps a standing account-level
+  # resource policy for, which is why the module names its groups under it.
+  # Scoping this grant to the same prefix means CI can create the log groups this
+  # repository needs and no others.
+  access_log_group_arns = [
+    "arn:${data.aws_partition.current.partition}:logs:us-east-1:${data.aws_caller_identity.current.account_id}:log-group:/aws/vendedlogs/cloudfront/${local.site_bucket_prefix}-*",
+    "arn:${data.aws_partition.current.partition}:logs:us-east-1:${data.aws_caller_identity.current.account_id}:log-group:/aws/vendedlogs/cloudfront/${local.site_bucket_prefix}-*:*",
+  ]
 }
 
 # ---------------------------------------------------------------------------
@@ -280,6 +300,10 @@ data "aws_iam_policy_document" "plan_read" {
       "logs:DescribeDeliveries",
       "logs:DescribeDeliveryDestinations",
       "logs:DescribeDeliverySources",
+      # An account-level list operation that rejects a resource-level
+      # constraint. It returns log group names and metadata, never log contents
+      # — the actions that read those are deliberately absent from this role.
+      "logs:DescribeLogGroups",
       "logs:GetDelivery",
       "logs:GetDeliveryDestination",
       "logs:GetDeliveryDestinationPolicy",
@@ -721,11 +745,16 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # between them are all CloudWatch Logs resources even when the logs land in
   # S3. None of these APIs supports resource-level conditions.
   #
-  # The destination-policy actions are here because a delivery to S3 needs
-  # one; log *group* management deliberately is not, because the module has
-  # not yet chosen its destination. If it delivers to CloudWatch Logs instead,
-  # this statement gains logs:CreateLogGroup and its siblings in the commit
-  # that makes that choice, rather than having been granted here on a guess.
+  # The destination-policy actions are here because a delivery to S3 needs one.
+  #
+  # The module has since chosen its destination — CloudWatch Logs, so that a
+  # teardown never has to empty a log bucket that is still receiving deliveries —
+  # so the log *group* management this statement once deferred is granted below,
+  # scoped to the ARN pattern the module names its groups under rather than to
+  # the account.
+  #
+  # None of the delivery APIs supports a resource-level condition, which is why
+  # this statement is `*` and the actions are enumerated instead.
   statement {
     sid    = "ManageLogDelivery"
     effect = "Allow"
@@ -753,6 +782,67 @@ data "aws_iam_policy_document" "apply_infrastructure" {
     ]
 
     resources = ["*"]
+  }
+
+  # Vended log delivery authorises itself through an account-level CloudWatch
+  # Logs resource policy — the standing `/aws/vendedlogs/*` entry AWS maintains —
+  # and the delivery APIs read and update it on the caller's behalf. Every action
+  # here is account-level and rejects a resource-level constraint, which is why
+  # this statement is `*` where the one below is scoped: logs:DescribeLogGroups
+  # is a list operation over the account, and a resource policy has no ARN to
+  # name at all.
+  #
+  # The residual risk, named rather than left to be discovered. CloudWatch Logs
+  # resource policies are account-scoped objects with no ARN to condition on, so
+  # logs:PutResourcePolicy on `*` is the only form this grant has — and it lets
+  # this role overwrite any resource policy in the account, including one that
+  # admits log delivery from a different account. Nothing narrows that; the
+  # enumeration above only keeps the grant to the two verbs the delivery APIs
+  # actually call. What bounds it is that this role is assumable solely from a
+  # job that has named a GitHub Environment, and that a policy overwritten here
+  # would be restored by the next apply of the environment that owns it. A
+  # deployment where CloudWatch Logs carries data from more than this repository
+  # should move these two actions to a separate role and grant them only for the
+  # duration of an apply.
+  statement {
+    sid    = "ManageVendedLogDeliveryPolicy"
+    effect = "Allow"
+
+    actions = [
+      "logs:DescribeLogGroups",
+      "logs:DescribeResourcePolicies",
+      "logs:PutResourcePolicy",
+    ]
+
+    resources = ["*"]
+  }
+
+  # The log groups themselves, scoped to the prefix the module owns.
+  #
+  # Unlike the delivery APIs, these do support resource-level conditions, so they
+  # get them: this role may create and delete the CloudFront access log groups
+  # this repository's environments need, and may not touch any other log group in
+  # the account. That distinction is the whole reason the module names its groups
+  # under a predictable prefix.
+  #
+  # The read actions for log *contents* — logs:GetLogEvents, logs:FilterLogEvents
+  # — are deliberately absent. Applying an environment requires creating the
+  # group, not reading what has been written into it.
+  statement {
+    sid    = "ManageAccessLogGroups"
+    effect = "Allow"
+
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:DeleteLogGroup",
+      "logs:DeleteRetentionPolicy",
+      "logs:ListTagsForResource",
+      "logs:PutRetentionPolicy",
+      "logs:TagResource",
+      "logs:UntagResource",
+    ]
+
+    resources = local.access_log_group_arns
   }
 
   # The end-to-end workflow's teardown assertion queries this API by the
