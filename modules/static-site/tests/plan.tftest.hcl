@@ -17,18 +17,40 @@
 #     Error: Retrieving AWS account details: validating provider credentials:
 #     retrieving caller identity from STS: ... InvalidClientTokenId
 #
-# The three `skip_*` arguments below are what remove that STS call, and the
-# literal keys are what stop the provider looking for real ones in the
-# environment, in ~/.aws or on the instance metadata endpoint. With them, this
-# suite passes with no HOME, no AWS variables of any kind and every outbound
-# HTTP request black-holed — which is the state a pull request from a fork runs
-# in, and the reason this can be a required check at all.
+# The `skip_*` arguments and the literal keys look like one guard and are two.
+# Each buys a different property, and neither is removable without losing the
+# one it buys:
 #
-# The keys are deliberate nonsense, and that is a second guard rather than a
-# formality. Every run block here is `command = plan`; a run block that omitted
-# `command` would default to apply, and against these credentials it fails
-# loudly instead of reaching an account. The job in validate.yml has no AWS
-# credentials configured either, so both halves have to be defeated on purpose.
+#   the three `skip_*` arguments   remove the STS call and the account-id
+#                                  lookup, which is what makes this suite
+#                                  credential-free. Without them it fails as
+#                                  above.
+#
+#   the literal keys               pin what an *apply* would authenticate with.
+#                                  Every run block here is `command = plan`, but
+#                                  a run block that omitted `command` would
+#                                  default to apply — and with these keys it
+#                                  fails loudly instead of falling back to the
+#                                  ambient credential chain and creating real
+#                                  infrastructure on a machine that happens to
+#                                  have working credentials. Delete them as
+#                                  apparently-dead weight and the suite stays
+#                                  green while that trap quietly opens.
+#
+# With both, this suite passes with no HOME, no AWS variables of any kind and
+# every outbound HTTP request black-holed — the state a pull request from a fork
+# runs in, and the reason this can be a required check at all. The job in
+# validate.yml has no AWS credentials configured either, so the apply trap has
+# two independent halves to defeat.
+#
+# One thing the keys do not do, since the first version of this comment claimed
+# they did: they do not stop the provider reading the shared config file. An
+# `AWS_PROFILE` naming a profile that does not exist still fails, with a
+# `failed to get shared config profile` parse error and six skipped run blocks.
+# That is local, loud and makes no network call — a valid profile, including an
+# MFA-gated one, is simply ignored in favour of the keys — so it costs the
+# credential-free claim nothing. It is recorded because a comment that overstates
+# its own insulation is how the next person stops checking.
 #
 # ---------------------------------------------------------------------------
 # Why not mock_provider
@@ -76,6 +98,23 @@
 # day nothing in this repository changed. It is inert for a caller: a root that
 # calls this module resolves providers through its own lock and never reads
 # this one.
+#
+# All five lock files here agree today and nothing compares them, which is worth
+# stating plainly rather than leaving as an implied guarantee. The alignment is
+# maintained by whoever refreshes them, so the standing obligation is on the
+# scheduled provider lock refresh: it has to cover child modules and not only
+# the roots under envs/ and bootstrap/. Bump those and forget this one and the
+# divergence lands in silence, which is the exact failure committing this file
+# was meant to prevent.
+#
+# A mechanical check was considered and deliberately deferred rather than
+# written here. Comparing locks across roots is not a one-liner — they hold
+# different provider sets, so "in sync" means "agree on every provider both
+# record", not "identical" — and the refresh is what decides whether that is
+# even the right invariant or whether a module should be allowed to lag. Writing
+# the check before the mechanism it constrains would be guessing at its
+# contract; writing the obligation down where the next person to touch this file
+# will read it costs nothing and expires only when the check exists.
 
 provider "aws" {
   region = "eu-west-1"
@@ -229,8 +268,9 @@ run "no_custom_domain" {
 # reference resolve. It is the narrowest possible use of mocking: four
 # attributes that cannot exist before an apply, in the one run block that is
 # about how resources refer to each other rather than about what they contain —
-# every assertion on the contents of these policies belongs in a run block where
-# the provider computes them. Crossing the default and assets wires in
+# what they contain is asserted in "security_headers" below, where nothing is
+# overridden and the provider computes every value. Crossing the default and
+# assets wires in
 # cloudfront.tf turns this run block red, which is the property that makes it
 # worth having.
 #
@@ -289,6 +329,100 @@ run "cache_and_header_policies_reach_the_right_behaviours" {
   assert {
     condition     = one(aws_cloudfront_distribution.site.ordered_cache_behavior).path_pattern == "/assets/*"
     error_message = "The second behaviour must match /assets/*, which is where Vite writes its content-hashed output. A pattern matching anything else would apply the immutable caching to the wrong half of the build."
+  }
+}
+
+# What the two response headers policies actually contain.
+#
+# The run block above proves each behaviour reaches the policy meant for it and
+# deliberately proves nothing about what is in that policy: it overrides the
+# policies' ids, so it is a statement about references. This one overrides
+# nothing, which is what lets the provider compute the header set and makes
+# these assertions statements about the headers themselves. Both were invisible
+# to the suite until now — deleting the whole content_security_policy block from
+# policies.tf, or dropping HSTS to a 60-second max-age, left it green.
+#
+# Every assertion iterates over both policies rather than naming one. That is
+# the property policies.tf is built to have — one map, one body, so the security
+# headers reach both behaviours by construction — and the app repository depends
+# on it: it asserts the Content-Security-Policy against a single request to "/"
+# and treats the answer as describing the whole distribution. Asserting only the
+# default policy here would go blind in exactly the same direction.
+#
+# It also settles, in code, whether the /assets/* policy carries the CSP. It
+# does. A CSP on a JS or CSS response is inert, with one exception: a web worker
+# is governed by the policy on the response that delivered its own script, and
+# Vite emits workers into assets/. Under one shared body a future worker fails
+# loudly against `default-src 'none'`; under a trimmed assets policy it would run
+# with no policy at all, quietly outside the posture this repository advertises.
+run "security_headers" {
+  command = plan
+
+  # The CSP is compared against the module's own output rather than against a
+  # copy of the string. outputs.tf publishes it precisely so that nothing
+  # restates it: the app repository already holds the second copy this
+  # repository cannot avoid, and a third one written into a test here would pass
+  # while describing a policy nobody had checked. This asserts the thing that
+  # actually matters instead — that the value published to the consumers who
+  # verify the live header is the value both policies were built from.
+  assert {
+    condition = alltrue([
+      for policy in values(aws_cloudfront_response_headers_policy.site) :
+      length(policy.security_headers_config[0].content_security_policy) == 1 &&
+      policy.security_headers_config[0].content_security_policy[0].content_security_policy == output.content_security_policy &&
+      policy.security_headers_config[0].content_security_policy[0].override
+    ])
+    error_message = "Both response headers policies must serve the Content-Security-Policy this module publishes as an output, with override on. The app repository refuses to deploy until the header CloudFront serves matches that output, so a policy that has lost it — or that serves something else — fails the other repository's next deploy rather than this one's pull request."
+  }
+
+  assert {
+    condition = alltrue([
+      for policy in values(aws_cloudfront_response_headers_policy.site) :
+      length(policy.security_headers_config[0].content_type_options) == 1 &&
+      policy.security_headers_config[0].content_type_options[0].override
+    ])
+    error_message = "Both response headers policies must send X-Content-Type-Options, which stops a browser second-guessing a Content-Type and executing a bundle served as something else."
+  }
+
+  # A year is the threshold the HSTS preload list requires, and it is asserted
+  # as a floor rather than as the exact number policies.tf chose. The floor is
+  # the requirement; the number is the module's to state once.
+  assert {
+    condition = alltrue([
+      for policy in values(aws_cloudfront_response_headers_policy.site) :
+      length(policy.security_headers_config[0].strict_transport_security) == 1 &&
+      policy.security_headers_config[0].strict_transport_security[0].access_control_max_age_sec >= 31536000 &&
+      policy.security_headers_config[0].strict_transport_security[0].override &&
+      !policy.security_headers_config[0].strict_transport_security[0].preload
+    ])
+    error_message = "Both response headers policies must send HSTS with a max-age of at least a year and override on, and must not request preloading — a one-way door this module has no business walking through on behalf of a domain the caller owns and the module has not been told about."
+  }
+
+  # `override = true` throughout, above and here, is load-bearing rather than
+  # defensive: with it false a header of the same name from the origin wins. S3
+  # sends none of these today, which is exactly why a wrong value would go
+  # unnoticed until the day an origin started sending one.
+  assert {
+    condition = alltrue([
+      for policy in values(aws_cloudfront_response_headers_policy.site) :
+      length(policy.custom_headers_config[0].items) == 1 &&
+      one(policy.custom_headers_config[0].items).header == "Cache-Control" &&
+      one(policy.custom_headers_config[0].items).override
+    ])
+    error_message = "Both response headers policies must send a Cache-Control header with override on. A cache policy emits nothing to the viewer — it decides only what the edge does — so without this the split-caching design is a claim the repository makes and does not deliver."
+  }
+
+  # The two values must differ, which is the whole of the split. Asserting the
+  # strings themselves would be a second copy of a decision policies.tf already
+  # states; asserting they are not the same catches the failure that matters,
+  # which is index.html going out with the immutable assets directive and
+  # sticking in every viewer's browser for a year.
+  assert {
+    condition = (
+      one(aws_cloudfront_response_headers_policy.site["default"].custom_headers_config[0].items).value !=
+      one(aws_cloudfront_response_headers_policy.site["assets"].custom_headers_config[0].items).value
+    )
+    error_message = "The default and assets behaviours must send different Cache-Control values. Handing the document the assets directive would cache index.html in every viewer's browser for a year, with no way to correct it short of a new hostname."
   }
 }
 

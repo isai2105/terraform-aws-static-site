@@ -291,9 +291,9 @@ in `PENDING_VALIDATION` is on the post-destroy checklist for the same reason.
 
 ## What a plan can establish, and what it cannot
 
-`make test` runs `tests/plan.tftest.hcl` with native `terraform test`: six run
-blocks, every one of them `command = plan`, against the real AWS provider and
-no AWS account. The provider configurations in the test file hold credentials
+`make test` runs `tests/plan.tftest.hcl` with native `terraform test`: seven
+run blocks, every one of them `command = plan`, against the real AWS provider
+and no AWS account. The provider configurations in the test file hold credentials
 that cannot reach AWS and skip the STS call the provider otherwise makes when
 it is configured, which is what makes this a `validate.yml` job like the
 others — required on every pull request, including one from a fork.
@@ -308,6 +308,10 @@ What it holds:
   meant for it, `/assets/*` included. The two are built from one map so the
   security headers cannot drift apart; this is what checks the other end of
   that wiring, where a behaviour can still be pointed at the wrong key
+- **both** response headers policies carry the CSP — compared against the
+  `content_security_policy` output rather than against a copy of the string —
+  plus `X-Content-Type-Options`, HSTS at a year or more without preload, and a
+  `Cache-Control` header, every one of them with `override` on
 - the module plans with no domain, with a domain and a managed certificate, and
   with a domain and a supplied one — and both directions of the
   domain/certificate-source rule are refused at plan time
