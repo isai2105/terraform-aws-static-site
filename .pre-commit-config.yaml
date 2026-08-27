@@ -1,0 +1,227 @@
+# pre-commit — the CI gate set, run before the push instead of after it.
+#
+# Install it once per clone:
+#
+#     brew install pre-commit   # or: pipx install pre-commit
+#     pre-commit install
+#
+# and every commit then runs the same checks a pull request runs, over the
+# files that commit touches; `pre-commit run --all-files` runs the lot on
+# demand. Nothing here is authoritative: the required status checks in
+# validate.yml are, and they run on the pushed commit whether or not this file
+# was ever installed. This is the
+# shift-left copy, and its only job is to fail in the shell a minute earlier
+# than it would fail on GitHub.
+#
+# Which means the one property that matters is that it fails on exactly what CI
+# fails on. A local hook that is *weaker* than the gate it mirrors is worse than
+# no local hook at all: it hands back a green run that CI then contradicts, and
+# the next reflex is to distrust the gate rather than the hook.
+#
+# That property is what decides the shape of the file below, and it is why the
+# Terraform hooks are `repo: local` wrappers around Makefile targets rather than
+# the pre-commit-terraform hooks that would be the obvious choice. The reasoning
+# is recorded in the block above those hooks, because it is the kind of decision
+# that reads as an oversight if the argument is not sitting next to it.
+#
+# The gate set mirrored here is the one that exists at this commit: terraform
+# fmt and validate, tflint, trivy, terraform-docs and actionlint. `zizmor` joins
+# validate.yml later and joins this file in the same commit, rather than being
+# left to drift in behind it.
+
+repos:
+  # -------------------------------------------------------------------------
+  # The Terraform checks, every one of them through the Makefile.
+  # -------------------------------------------------------------------------
+  #
+  # The obvious wiring is antonbabenko/pre-commit-terraform, and it was measured
+  # rather than assumed. It loses on both halves of the property above.
+  #
+  # It runs a different *tool*. Every hook there is `language: script`, so `rev:`
+  # pins the wrapper shell script and nothing else — the wrapper then runs
+  # whichever terraform, tflint, trivy or terraform-docs is on `$PATH`. That is
+  # not a version conflict with the Makefile, which also runs what is on `$PATH`;
+  # it is a bypass of `check-terraform`, `check-tflint`, `check-trivy` and
+  # `check-terraform-docs`, which exist precisely because a check run against an
+  # unpinned binary answers a question this repository did not ask. v1.109.0's
+  # `--hook-config=--tool-version=` is the wrong fix: it puts the version number
+  # in a YAML file that cannot read the Makefile, which is the duplication
+  # `print-tflint-version` and its siblings exist to prevent.
+  #
+  # It also runs a different *invocation*. `common::per_dir_hook` `pushd`es into
+  # each directory holding a changed file, so every hook runs with a module as
+  # its working directory rather than the repository root — and all three of the
+  # config files here are discovered relative to the working directory. Measured
+  # against this repository at v1.109.0:
+  #
+  #   terraform_validate  fails outright on modules/static-site with "Provider
+  #                       configuration not present" on all seven us-east-1
+  #                       resources. The module declares `configuration_aliases`
+  #                       and cannot be initialised as a root; the Makefile's
+  #                       `validate` knows that and covers it through
+  #                       examples/default instead. The hook also leaves a
+  #                       .terraform.lock.hcl behind inside the module, which is
+  #                       the file .terraform-docs.yml turns `lockfile: false`
+  #                       off for.
+  #   terraform_tflint    passes, on a weaker ruleset. With no --config it finds
+  #                       no .tflint.hcl from a module directory and falls back
+  #                       to built-in defaults: no AWS ruleset, no naming rule.
+  #                       On a probe file with a bad resource name and a
+  #                       two-character bucket name it reported 2 issues where
+  #                       `make lint` reported 4.
+  #   terraform_trivy     passes, without --ignorefile and without
+  #                       --skip-check-update, so it reads no .trivyignore and
+  #                       pulls a checks bundle from ghcr.io instead of using
+  #                       the ones compiled into the pinned binary. Different
+  #                       rules, and a network call on every commit.
+  #   terraform_docs      regenerates modules/static-site/README.md with
+  #                       built-in defaults — anchors back, "Modules — No
+  #                       modules." back, inputs alphabetical rather than
+  #                       required-first — a 27-insertion, 23-deletion diff that
+  #                       `make docs-check` then rejects wholesale.
+  #
+  # Two of those are loud and two are silent, and the silent pair is the reason
+  # this is not a matter of taste. Every one is fixable by hand — the wrapper
+  # substitutes `__GIT_WORKING_DIR__` for the repository root, so
+  # `--args=--config=__GIT_WORKING_DIR__/.tflint.hcl` reaches tflint with an
+  # absolute path — but fixing them means writing a second copy of an invocation
+  # the Makefile already owns, in a file that cannot read the Makefile. That is
+  # the same argument that made validate.yml install the trivy and terraform-docs
+  # binaries and call `make` rather than use trivy-action or
+  # terraform-docs/gh-actions, and it lands in the same place: call the target.
+  #
+  # What the target buys, beyond the flags: the absolute --config paths, the
+  # discovery loops, the `examples/` exclusion, the child-module coverage rule —
+  # and the version guards, so a contributor on the wrong binary gets the
+  # Makefile's message instead of a README that CI rejects.
+  #
+  # The cost, named because everything here costs something: these run
+  # repository-wide rather than on the changed directory, so the whole set takes
+  # about thirteen seconds regardless of what was touched, eleven of which is
+  # `validate` initialising seven directories. Per-directory scoping is the one
+  # thing pre-commit-terraform genuinely offers, and it is not worth a check
+  # that disagrees with CI. `files:` still decides whether a hook runs at all,
+  # so a commit touching no Terraform pays none of it.
+  #
+  # `pass_filenames: false` on all five: the targets discover their own targets,
+  # and appending a list of changed files to `make fmt` would ask make to build
+  # a goal named after a .tf file.
+  - repo: local
+    hooks:
+      # `fmt` rather than `fmt-check`, so the hook fixes the formatting and
+      # reports "files were modified by this hook" instead of printing a diff
+      # and leaving the work to be redone by hand. It is the same choice
+      # terraform-docs makes below, for the same reason: the canonical form is
+      # generated, so there is nothing to preserve by refusing to write it.
+      #
+      # .terraform-version is a trigger because it is the terraform pin: a
+      # commit that moves it should run `check-terraform` and find out whether
+      # the installed binary moved with it. Every hook here triggers on the
+      # Makefile for the same reason, that being where the other three pins are.
+      - id: terraform-fmt
+        name: terraform fmt
+        entry: make fmt
+        language: system
+        pass_filenames: false
+        files: \.(tf|tfvars|tftest\.hcl)$|^\.terraform-version$|^Makefile$
+
+      # The lock files are a trigger too. `validate` runs `init` first, and
+      # `init` resolves providers through .terraform.lock.hcl, so a commit that
+      # refreshes a lock and nothing else — which is exactly what a scheduled
+      # lock-refresh produces — changes what this target would say.
+      - id: terraform-validate
+        name: terraform validate
+        entry: make validate
+        language: system
+        pass_filenames: false
+        files: \.(tf|tfvars)$|\.terraform\.lock\.hcl$|^\.terraform-version$|^Makefile$
+
+      - id: tflint
+        name: tflint
+        entry: make lint
+        language: system
+        pass_filenames: false
+        files: \.(tf|tfvars)$|^\.tflint\.hcl$|^Makefile$
+
+      - id: trivy
+        name: trivy
+        entry: make scan
+        language: system
+        pass_filenames: false
+        files: \.(tf|tfvars)$|^\.trivyignore$|^Makefile$
+
+      # Narrower than the rest because the target is: `docs` only regenerates
+      # READMEs under modules/, and the example roots beside them are excluded.
+      #
+      # The README itself is a trigger and not only an output. The generated
+      # block is the one thing here a person can plausibly edit by hand — it
+      # looks like prose and sits in a file that is mostly prose — and a commit
+      # touching nothing but that README would otherwise run no hook at all and
+      # discover the drift on GitHub.
+      - id: terraform-docs
+        name: terraform-docs
+        entry: make docs
+        language: system
+        pass_filenames: false
+        files: ^modules/.*(\.tf|/README\.md)$|^\.terraform-docs\.yml$|^Makefile$
+
+  # -------------------------------------------------------------------------
+  # actionlint — the one check here that is not a Makefile target.
+  # -------------------------------------------------------------------------
+  #
+  # The argument above does not reach this one. There is no `make actionlint` for
+  # it to be a second copy of, and `rev:` is a real pin here rather than a
+  # wrapper pin: the hooks file at v1.7.12 names the v1.7.12 image, which is the
+  # release validate.yml runs.
+  #
+  # The docker variant rather than the golang or system ones, because actionlint
+  # shells out to shellcheck to check `run:` blocks and simply does less when
+  # shellcheck is not on `$PATH` — no warning, a smaller set of findings, a green
+  # local run and a red CI one. That is the silent-weakening failure this file
+  # exists to avoid, arriving from a different direction. The image carries
+  # shellcheck and pyflakes, so the hook checks what the job checks. It needs a
+  # running Docker daemon, and fails loudly saying so when there is not one.
+  #
+  # The gap that remains, stated rather than papered over: validate.yml pins the
+  # image by digest and this pins it by the `1.7.12` tag the upstream hooks file
+  # carries, and a tag can be moved. Restating the digest here would close it and
+  # open a worse one — a second copy of the pin, in the file least likely to be
+  # updated alongside the workflow.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint-docker
+        # Renamed from the upstream "Lint GitHub Actions workflow files" so a
+        # run reads as the list of validate.yml job names it mirrors. The id is
+        # still what selects it: `pre-commit run actionlint-docker`.
+        name: actionlint
+
+  # -------------------------------------------------------------------------
+  # gitleaks — offered, not required.
+  # -------------------------------------------------------------------------
+  #
+  # `stages: [manual]`, so it never runs on commit and never runs under
+  # `pre-commit run --all-files`. Run it deliberately:
+  #
+  #     pre-commit run --hook-stage manual gitleaks
+  #
+  # or move it to the default stage in a local edit if you want it on every
+  # commit. It scans the staged diff (`gitleaks git --staged`), so it has
+  # something to say only when something is staged.
+  #
+  # It is opt-in because a local secret scanner is not a control. Anything it
+  # would catch is caught again by GitHub push protection on the receiving end,
+  # which is server-side and therefore cannot be skipped — `--no-verify` skips
+  # every hook in this file, and a hook that can be skipped by the person it is
+  # protecting against is a reminder, not a gate. Making it required would buy
+  # the appearance of a second control and the reality of a slower commit.
+  #
+  # Kept in this file rather than left to each clone because the reminder is
+  # still worth having: push protection rejects the push, and by then the secret
+  # is in a local commit that has to be rewritten out of the branch.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        name: gitleaks
+        stages: [manual]
