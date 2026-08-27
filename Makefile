@@ -473,19 +473,67 @@ docs-check: check-terraform-docs ## Fail if any module README's generated block 
 # modules/static-site/tests/plan.tftest.hcl rather than restated here. Verified
 # with no HOME, no AWS environment variables and every outbound HTTP request
 # black-holed.
+#
+# The second pass below exists for the reason `validate`'s does, and the two are
+# deliberately the same shape. Discovery by file is what keeps a target covering
+# directories added after it was written; it is also what lets a directory fall
+# out of the target in silence, because a module shipped with no `.tftest.hcl`
+# beside it is not skipped with a message — it is simply never mentioned, and
+# this required check goes green having tested nothing about it. So every module
+# under modules/ has to produce a test root, and this target fails if one does
+# not.
+#
+# `docs` sets the other precedent and it is the weaker fit here, which is worth
+# saying rather than leaving as an unexplained asymmetry: `docs-check` exits 0
+# only when there are no modules at all, and fails the moment a module's README
+# has drifted from the .tf files beside it — so a module it covers cannot be
+# silently uncovered. A module with no tests is exactly that. There is also
+# nothing else to fall back on: `validate` can honestly say a skipped module is
+# type-checked through its callers, and no other target in this file asserts
+# anything a test would.
+#
+# `examples/` roots are excluded, as they are from `docs`, and for the same
+# reason: an example is a caller written to be read, not an interface with
+# behaviour to pin down. It is covered by fmt, validate, lint and scan, which is
+# where an example root can actually be wrong.
 test: check-terraform ## Run the module tests with `terraform test`.
 	@dirs="$$(find . -type d -name .terraform -prune -o -type f -name '*.tftest.hcl' -print \
-		| sed -e 's|/[^/]*$$||' -e 's|/tests$$||' \
+		| sed -e 's|/[^/]*$$||' -e 's|/tests$$||' -e 's|^\./||' \
 		| sort -u)"; \
 	if [ -z "$$dirs" ]; then \
-		echo "no .tftest.hcl files found; nothing to test"; \
-		exit 0; \
+		echo "no .tftest.hcl files found; nothing to run"; \
+	else \
+		while IFS= read -r dir; do \
+			echo "==> $$dir"; \
+			terraform -chdir="$$dir" init -backend=false -input=false; \
+			terraform -chdir="$$dir" test; \
+		done <<< "$$dirs"; \
 	fi; \
-	while IFS= read -r dir; do \
-		echo "==> $$dir"; \
-		terraform -chdir="$$dir" init -backend=false -input=false; \
-		terraform -chdir="$$dir" test; \
-	done <<< "$$dirs"
+	modules="$$(find modules -type d -name .terraform -prune -o -type f -name '*.tf' -print \
+		| sed -e 's|/[^/]*$$||' -e '\|/examples/|d' \
+		| sort -u)"; \
+	untested=(); \
+	while IFS= read -r module; do \
+		[ -n "$$module" ] || continue; \
+		if ! grep -qxF -- "$$module" <<< "$$dirs"; then \
+			untested+=("$$module"); \
+		fi; \
+	done <<< "$$modules"; \
+	if [ $${#untested[@]} -gt 0 ]; then \
+		echo "" >&2; \
+		echo "make: these modules have no terraform tests:" >&2; \
+		printf '        %s\n' "$${untested[@]}" >&2; \
+		echo "" >&2; \
+		echo "      This target discovers its work from the .tftest.hcl files it finds, so" >&2; \
+		echo "      a module without any is not skipped with a warning — it is never" >&2; \
+		echo "      mentioned, and this required check reports green having asserted" >&2; \
+		echo "      nothing about it. Add tests/<name>.tftest.hcl beside the module." >&2; \
+		echo "" >&2; \
+		echo "      modules/static-site/tests/plan.tftest.hcl is the worked example," >&2; \
+		echo "      including how a module taking configuration_aliases is given its" >&2; \
+		echo "      provider configurations and how the suite stays credential-free." >&2; \
+		exit 1; \
+	fi
 
 # ---------------------------------------------------------------------------
 # The environment targets

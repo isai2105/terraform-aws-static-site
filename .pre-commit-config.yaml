@@ -121,7 +121,7 @@ repos:
   # repository-wide rather than on the changed directory, so the whole set takes
   # about seventeen seconds regardless of what was touched — eleven of which is
   # `validate` initialising seven directories, and three `test` initialising the
-  # module and planning it six times. Per-directory scoping is the one thing
+  # module and planning it seven times. Per-directory scoping is the one thing
   # pre-commit-terraform genuinely offers, and it is not worth a check that
   # disagrees with CI. `files:` still decides whether a hook runs at all, so a
   # commit touching no Terraform pays none of it.
