@@ -69,7 +69,7 @@ same reason, so an environment in `eu-west-1` will find its access logs in
 `us-east-1`. That is expected.
 
 The ACM certificate for the optional custom domain has the identical constraint
-and will use this same alias when it arrives.
+and uses this same alias.
 
 ## Both providers must carry `default_tags`
 
@@ -88,13 +88,21 @@ an untagged orphan is indistinguishable from no orphan at all. `Env` is compared
 rather than merely required because an environment root copied from another one
 keeps the tag it was copied with, which is how prod ends up tagged `stage`.
 
-### Three resources cannot be tagged, and the teardown check cannot see them
+### Four resources cannot be tagged, and the teardown check cannot see them
 
-`aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy` and
-`aws_cloudfront_origin_access_control` expose no `tags` and no `tags_all` — the
-CloudFront API has nowhere to put them. The resource groups tagging API returns
-only taggable resources, so **a leak of any of these leaves the teardown
-assertion green**. That is not fixable by tagging; it is a property of the API.
+`aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy`,
+`aws_cloudfront_origin_access_control` and the certificate validation
+`aws_route53_record` expose no `tags` and no `tags_all` — neither the CloudFront
+API nor a Route 53 resource record set has anywhere to put them. The resource
+groups tagging API returns only taggable resources, so **a leak of any of these
+leaves the teardown assertion green**. That is not fixable by tagging; it is a
+property of the API.
+
+The validation record is the mildest of the four: it is created only on the
+custom-domain path, it is not quota-bearing, and `allow_overwrite` means a
+stranded copy is corrected by the next apply rather than blocking it. The ACM
+certificate beside it **is** taggable, which is what matters, because a
+certificate stuck in `PENDING_VALIDATION` is the orphan that path produces.
 
 It matters most where the quota is tightest. This module creates four
 untaggable, quota-bearing resources per environment against an account-wide cap
@@ -212,14 +220,75 @@ that is in fact correct.
 Its content and etag are ignored after creation, so an application deploy is
 never reverted by the next `terraform apply`.
 
+## A custom domain is optional
+
+Left alone, the distribution serves from its own `*.cloudfront.net` hostname on
+the default CloudFront certificate. That is the default because it is the only
+configuration that works in an account whose owner does not happen to own a
+domain — and it is what every environment in this repository uses.
+
+Setting `domain_name` turns on the alias, the certificate and the TLS policy
+together. Exactly one of two companion inputs must come with it, and which one
+depends on where the domain's DNS actually lives:
+
+| | `hosted_zone_id` | `acm_certificate_arn` |
+|---|---|---|
+| For | a Route 53 public zone in this account | any other DNS — a registrar, another provider, another account |
+| The module | requests the certificate, writes the validation record, waits for ACM to issue it | attaches a certificate you have already issued |
+| Lifecycle | created and destroyed with the environment | not managed here; survives `terraform destroy` |
+
+```hcl
+# Route 53 in this account — fully automated.
+domain_name    = "app.example.com"
+hosted_zone_id = "Z1D633PJN98FT9"
+
+# DNS anywhere else — issue the certificate first, then pass its ARN.
+domain_name         = "app.example.com"
+acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/abcd1234-..."
+```
+
+Setting `domain_name` with neither, or with both, is rejected at plan time.
+So is a certificate ARN outside `us-east-1`, a zone *name* where an id belongs,
+and a `domain_name` carrying a scheme or a trailing dot — each of these
+otherwise fails at apply as an `InvalidViewerCertificate` on the distribution,
+an error that names none of them.
+
+One name, never a wildcard: `*.example.com` is rejected on purpose. A wildcard
+certificate covers the subdomains and not the apex, so making it useful means
+adding `example.com` as a subject alternative name — and this module issues no
+SANs by design, which is what lets the validation record be resolved with
+`one()` instead of a `for_each` over a set that does not exist until the
+certificate does. Accepting a wildcard would advertise half a feature. If you
+need one, issue it yourself and attach it through `acm_certificate_arn`.
+
+Supporting only the Route 53 case would make the input narrower than it reads:
+`domain_name` would mean "bring a domain hosted in Route 53 in this account".
+The second mode also avoids an ordering trap the first does not have — with
+external DNS the validation record cannot exist before the certificate that
+nominates it, so an apply that requested and waited would block while an
+operator raced to read the record out of the ACM console.
+
+Two things follow from a certificate being attached, both handled here: TLS
+below 1.2 is refused (`minimum_protocol_version = "TLSv1.2_2021"`, which is only
+settable *because* there is a custom certificate — AWS pins the default one to
+`TLSv1`), and viewers connect over SNI rather than a dedicated IP, which costs
+roughly $600 a month and buys support for clients that predate SNI.
+
+> **This path is plan-verified only. It has never been applied, in CI or by
+> hand.** Every environment here leaves `domain_name` null, so nothing exercises
+> DNS validation, a certificate/alias mismatch, or ACM's deletion lag against
+> real AWS. The variable rules and the conditional wiring are checked at plan
+> time and that is the whole of it. Treating a plan-time check as coverage of
+> DNS validation would be worse than saying plainly that it is not.
+
+Destroying it has one documented sharp edge: a certificate deletion can fail
+with `ResourceInUseException` *after* its distribution is already gone, because
+the association lingers cross-service. The provider retries for 20 minutes and
+then gives up. Re-running `terraform destroy` is the fix, and a certificate left
+in `PENDING_VALIDATION` is on the post-destroy checklist for the same reason.
+
 ## What this module does not do yet
 
-Deliberately, in the order the repository adds them:
-
-- **A custom domain.** There is no `domain_name` input yet, so the distribution
-  serves from its own `*.cloudfront.net` hostname on the default CloudFront
-  certificate. This is also why `minimum_protocol_version` is not set: AWS
-  requires `TLSv1` alongside the default certificate and rejects anything higher.
 - **The cross-repository contract.** The SSM parameters the app repository reads,
   and the scoped OIDC deploy role it assumes, arrive with the contract phase.
 

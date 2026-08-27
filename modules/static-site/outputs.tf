@@ -35,12 +35,24 @@ output "distribution_domain_name" {
 output "site_url" {
   description = "Scheme-qualified URL the site is served from. Published resolved rather than as parts, so that no consumer ever re-derives it and gets the answer wrong."
 
-  # One value, computed once, in the module that owns the conditional. When the
-  # optional custom domain arrives this becomes the alias instead of the
-  # distribution hostname, and every consumer of this output keeps working
-  # without knowing that happened — which is the entire reason it is published
-  # resolved rather than as a hostname a caller has to prefix.
-  value = "https://${aws_cloudfront_distribution.site.domain_name}"
+  # One value, computed once, in the module that owns the conditional: the alias
+  # when a custom domain was asked for, the distribution's own hostname
+  # otherwise. Every consumer keeps working across that switch without knowing it
+  # happened, which is the entire reason this is published resolved rather than
+  # as a hostname a caller has to prefix and a flag it has to interpret.
+  #
+  # It reads `var.domain_name` rather than the distribution's `aliases`, because
+  # the two are the same value and only one of them is known at plan time.
+  value = "https://${local.custom_domain_enabled ? var.domain_name : aws_cloudfront_distribution.site.domain_name}"
+}
+
+output "certificate_arn" {
+  description = "ARN of the ACM certificate serving viewer HTTPS, or null when the distribution uses the default CloudFront certificate. Set to the caller's own certificate when one was supplied rather than requested."
+
+  # Published for the teardown runbook rather than for the app repository. A
+  # certificate stuck in PENDING_VALIDATION is on the post-destroy checklist, and
+  # the value that identifies it is otherwise readable only from state.
+  value = local.viewer_certificate_arn
 }
 
 output "content_security_policy" {

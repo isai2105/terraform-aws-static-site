@@ -5,14 +5,23 @@
 # mechanism the environment roots use, and keeping it the only one means there
 # is never a second place tags can come from and disagree.
 #
-# The qualification is not pedantic and it bounds everything below. Three of the
+# The qualification is not pedantic and it bounds everything below. Four of the
 # resource types here accept no tags at all — the two CloudFront policy types in
-# policies.tf and the origin access control in cloudfront.tf, none of which
-# expose `tags` or `tags_all` in the provider schema, because the CloudFront API
-# has nowhere to put them. The precondition in this file therefore guarantees
-# that everything *taggable* is tagged, which is a narrower claim than it looks
-# and is the strongest one available. policies.tf carries what that costs the
-# teardown assertion and which detectors are left.
+# policies.tf, the origin access control in cloudfront.tf, and the certificate
+# validation record in certificate.tf, none of which expose `tags` or `tags_all`
+# in the provider schema, because neither the CloudFront API nor a Route 53
+# resource record set has anywhere to put them. The precondition in this file
+# therefore guarantees that everything *taggable* is tagged, which is a narrower
+# claim than it looks and is the strongest one available. policies.tf carries
+# what that costs the teardown assertion and which detectors are left.
+#
+# The validation record is the least dangerous of the four and the only one that
+# is not quota-bearing: it lives in a zone this module does not own, it is
+# created only on the custom-domain path that no environment here uses, and
+# `allow_overwrite` on it means a copy stranded by a failed cycle is corrected by
+# the next apply rather than blocking it. The ACM certificate beside it *is*
+# taggable, which matters more, because a certificate stuck in PENDING_VALIDATION
+# is the orphan that path actually produces.
 #
 # It has one failure mode, and it is silent. `default_tags` is a block inside a
 # single `provider` configuration; an aliased provider is a separate
