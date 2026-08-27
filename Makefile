@@ -5,9 +5,9 @@
 # invocation paths cannot drift apart.
 #
 # Only the targets that work today ship here — a target that does not work yet
-# is indistinguishable from one that is broken. The stage targets arrived with
-# the commit that created `envs/stage`; `test` arrives with the module tests,
-# and the prod targets with `envs/prod`.
+# is indistinguishable from one that is broken. The stage and prod targets each
+# arrived with the commit that created the directory they point at; `test`
+# arrives with the module tests.
 #
 # The file is in two halves. Everything down to `scan` is a check: it reaches no
 # AWS account, needs no credentials, and is safe to require on a pull request.
@@ -50,6 +50,7 @@ TRIVY_IGNOREFILE := $(CURDIR)/.trivyignore
 
 .PHONY: help fmt fmt-check validate lint scan \
 	plan-stage apply-stage destroy-stage \
+	plan-prod apply-prod destroy-prod \
 	check-terraform check-tflint check-trivy \
 	print-tflint-version print-trivy-version
 
@@ -288,10 +289,10 @@ scan: check-trivy ## Scan every Terraform file for misconfigurations with Trivy.
 #
 # The targets are still spelled out one per environment rather than written as
 # a `%` pattern rule. A pattern would silently accept `make plan-nonsense`, and
-# it would also make `plan-prod` exist before `envs/prod` does — and a target
-# that does not work yet is indistinguishable from one that is broken, which is
-# the same rule that kept these three out of the repository until this commit
-# created the directory they point at.
+# it would have made `plan-prod` exist before `envs/prod` did — a target that
+# does not work yet is indistinguishable from one that is broken, which is the
+# rule that kept each trio out of the repository until the commit that created
+# the directory it points at.
 #
 # $(1) is the terraform subcommand, $(2) the environment name.
 define terraform_env
@@ -349,3 +350,12 @@ apply-stage: check-terraform ## Apply the stage environment. Prompts before chan
 
 destroy-stage: check-terraform ## Destroy the stage environment. Prompts before removing anything.
 	$(call terraform_env,destroy,stage)
+
+plan-prod: check-terraform ## Plan the prod environment against AWS.
+	$(call terraform_env,plan,prod)
+
+apply-prod: check-terraform ## Apply the prod environment. Prompts before changing anything.
+	$(call terraform_env,apply,prod)
+
+destroy-prod: check-terraform ## Destroy the prod environment. Prompts before removing anything.
+	$(call terraform_env,destroy,prod)
