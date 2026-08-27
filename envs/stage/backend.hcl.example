@@ -1,0 +1,49 @@
+# Backend configuration for the stage environment — the tracked example.
+#
+# Copy this to `backend.hcl` beside it, fill in the two account-specific values,
+# and initialise:
+#
+#   cp envs/stage/backend.hcl.example envs/stage/backend.hcl
+#   terraform -chdir=envs/stage init -backend-config=backend.hcl
+#
+# `make plan-stage` does exactly that for you and fails with this instruction if
+# the file is missing.
+#
+# `backend.hcl` itself is gitignored, and this example is the tracked artefact,
+# because the bucket name below is per-account: the bootstrap mints it with a
+# `random_id` suffix, so no two clones of this repository share one. The
+# bootstrap prints the filled-in form as its `backend_init_command` output —
+# copy the values from there rather than reconstructing them:
+#
+#   terraform -chdir=bootstrap output backend_init_command
+#
+# CI does not read this file. `plan.yml` and `apply.yml` pass the same four
+# values as `-backend-config=` flags from repository variables, which the
+# bootstrap's `repository_variable_commands` output sets. Two paths to the same
+# four values, and neither is a copy of the other.
+
+# From the bootstrap's `state_bucket_name` output. Composed as
+# "<name_prefix>-tfstate-<8 hex characters>".
+bucket = "REPLACE-ME-tfstate-0123abcd"
+
+# Not a placeholder, and not to be changed. The CI plan and apply roles scope
+# their state grants to exactly "<env>/terraform.tfstate" and their lock grants
+# to "<env>/terraform.tfstate.tflock" — a different key here is a key no role
+# can read or write, failing at init with an AccessDenied that says nothing
+# about this line.
+key = "stage/terraform.tfstate"
+
+# Must be the region the state bucket was created in, which is the region
+# `terraform.tfvars` deploys this environment into. S3 will not infer it.
+region = "REPLACE-ME"
+
+# Native S3 state locking, GA since Terraform 1.11 — which is why every root
+# here declares that floor. This is the first file in the repository where the
+# argument can legitimately appear: it is a backend argument, and the bootstrap
+# has no backend.
+#
+# It replaces the DynamoDB lock table the older pattern required, whose
+# arguments the same release deprecated. An older CLI does not fail on this
+# line; it ignores it and runs with no locking at all, which is why the floor is
+# declared rather than assumed.
+use_lockfile = true

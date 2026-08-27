@@ -1,0 +1,25 @@
+# Remote state for the stage environment.
+#
+# The block is empty on purpose. Every value it needs — the bucket name, the
+# region, the state key — is per-account: the bucket carries a `random_id`
+# suffix minted by the bootstrap, so no two clones of this repository share one.
+# Committing them would make this file wrong for everybody except the account it
+# was written in, which is the opposite of what a reference implementation owes
+# a cloner.
+#
+# The values are supplied at `init` instead, from two places that never
+# disagree because neither is a copy of the other:
+#
+#   - locally, `-backend-config=backend.hcl` — gitignored, created from
+#     backend.hcl.example beside this file, which the bootstrap's
+#     `backend_init_command` output fills in
+#   - in CI, `-backend-config=` flags read from repository variables, which the
+#     bootstrap's `repository_variable_commands` output sets
+#
+# Remote state is required even though nothing here stays deployed. State must
+# outlive the machine that created it, or `destroy` cannot find what to remove —
+# and an environment that cannot be destroyed is the one defect this operating
+# model does not tolerate.
+terraform {
+  backend "s3" {}
+}

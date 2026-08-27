@@ -4,10 +4,14 @@
 # calls these exact targets rather than open-coding the commands, so the two
 # invocation paths cannot drift apart.
 #
-# Only the targets that work today ship here. `test` and the per-environment
-# plan/apply/destroy targets arrive with the commits that add the thing each
-# one drives — a target that does not work yet is indistinguishable from one
-# that is broken.
+# Only the targets that work today ship here — a target that does not work yet
+# is indistinguishable from one that is broken. The stage targets arrived with
+# the commit that created `envs/stage`; `test` arrives with the module tests,
+# and the prod targets with `envs/prod`.
+#
+# The file is in two halves. Everything down to `scan` is a check: it reaches no
+# AWS account, needs no credentials, and is safe to require on a pull request.
+# Everything after it talks to AWS.
 
 # Bash rather than /bin/sh, with `-e -u -o pipefail`, so a command that fails
 # inside a loop or a pipeline fails the target instead of being swallowed.
@@ -45,6 +49,7 @@ TRIVY_VERSION := 0.74.0
 TRIVY_IGNOREFILE := $(CURDIR)/.trivyignore
 
 .PHONY: help fmt fmt-check validate lint scan \
+	plan-stage apply-stage destroy-stage \
 	check-terraform check-tflint check-trivy \
 	print-tflint-version print-trivy-version
 
@@ -53,7 +58,7 @@ help: ## Show the available targets.
 	@echo
 	@grep -E '^[a-zA-Z][a-zA-Z_-]*:.*## ' $(MAKEFILE_LIST) \
 		| sort \
-		| awk 'BEGIN { FS = ":.*## " } { printf "  %-10s %s\n", $$1, $$2 }'
+		| awk 'BEGIN { FS = ":.*## " } { printf "  %-14s %s\n", $$1, $$2 }'
 	@echo
 	@echo "terraform pinned by .terraform-version: $(TERRAFORM_VERSION)"
 	@echo "tflint pinned by this Makefile:         $(TFLINT_VERSION)"
@@ -263,3 +268,84 @@ scan: check-trivy ## Scan every Terraform file for misconfigurations with Trivy.
 		--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
 		--ignorefile "$(TRIVY_IGNOREFILE)" \
 		--skip-check-update
+
+# ---------------------------------------------------------------------------
+# The environment targets
+# ---------------------------------------------------------------------------
+
+# Everything above this line is a check: it reaches no AWS account, needs no
+# credentials, and is safe to make a required status check. Everything below it
+# talks to AWS. They are separated rather than interleaved so that the boundary
+# is visible in the file rather than remembered.
+#
+# One canned recipe, called once per environment per verb, instead of six
+# near-identical bodies. The duplication these replace is not cosmetic: `envs/
+# prod` is `envs/stage` with different values, so a prod target written by
+# copying a stage target is exactly where an `-chdir` gets left pointing at
+# stage — an apply that reports success against the wrong environment, which is
+# the single worst failure available here. With one body the environment is an
+# argument and cannot be half-edited.
+#
+# The targets are still spelled out one per environment rather than written as
+# a `%` pattern rule. A pattern would silently accept `make plan-nonsense`, and
+# it would also make `plan-prod` exist before `envs/prod` does — and a target
+# that does not work yet is indistinguishable from one that is broken, which is
+# the same rule that kept these three out of the repository until this commit
+# created the directory they point at.
+#
+# $(1) is the terraform subcommand, $(2) the environment name.
+define terraform_env
+	@if [ ! -f "envs/$(2)/backend.hcl" ]; then \
+		echo "make: envs/$(2)/backend.hcl is missing." >&2; \
+		echo "      Backend values are per-account — the state bucket carries a random" >&2; \
+		echo "      suffix — so the file is gitignored and created from the example:" >&2; \
+		echo "" >&2; \
+		echo "        cp envs/$(2)/backend.hcl.example envs/$(2)/backend.hcl" >&2; \
+		echo "" >&2; \
+		echo "      Then fill in the bucket and region. The bootstrap prints them:" >&2; \
+		echo "" >&2; \
+		echo "        terraform -chdir=bootstrap output backend_init_command" >&2; \
+		exit 1; \
+	fi
+	terraform -chdir="envs/$(2)" init -input=false -backend-config=backend.hcl
+	terraform -chdir="envs/$(2)" $(1)
+endef
+
+# `init` runs on every invocation rather than only the first, and it is cheap
+# once the providers are cached. It is what makes these targets correct after a
+# `git pull` that changed a provider constraint or the module's source, instead
+# of failing with a stale lock or a module that is not there.
+#
+# The one thing it cannot do for you is decide what a *changed* `backend.hcl`
+# means. Edit that file after a successful init — correcting a typo in the
+# bucket name is the usual reason — and the next run stops with "Backend
+# configuration changed", asking for `-reconfigure` or `-migrate-state`. Neither
+# flag is added here, because which one is correct depends on a fact this
+# Makefile does not have:
+#
+#   -reconfigure    discards the recorded association and initialises against
+#                   the new values. Right when nothing was ever written under
+#                   the old ones — a typo caught on the first init, which is
+#                   the common case.
+#   -migrate-state  copies the existing state to the new location. Right when
+#                   the old values did point at real state that should move.
+#
+# Guessing wrong in the first direction abandons a state file; guessing wrong in
+# the second copies state somewhere it does not belong. Baking `-reconfigure`
+# into the recipe would make that choice silently, on every run, for everyone —
+# which is why the error is left to surface and be read.
+#
+# None of the three passes `-auto-approve` or `-input=false` to the verb itself.
+# The interactive confirmation on apply and destroy is the only thing standing
+# between a mistyped target and a real environment, and CI does not use these
+# targets — `apply.yml` applies a reviewed plan artefact, which is a different
+# and stronger control than a prompt.
+
+plan-stage: check-terraform ## Plan the stage environment against AWS.
+	$(call terraform_env,plan,stage)
+
+apply-stage: check-terraform ## Apply the stage environment. Prompts before changing anything.
+	$(call terraform_env,apply,stage)
+
+destroy-stage: check-terraform ## Destroy the stage environment. Prompts before removing anything.
+	$(call terraform_env,destroy,stage)
