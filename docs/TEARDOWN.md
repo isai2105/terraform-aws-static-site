@@ -72,8 +72,17 @@ terraform -chdir=envs/<env> destroy
 
 `-reconfigure` is **not** needed, and reaching for it is a mistake worth naming. It is the flag
 for discarding a recorded backend association, and there is none to discard: `make validate`
-runs `init -backend=false`, which writes no backend record at all. Both environments were
-initialised against the S3 backend on 2026-08-27 with the line above and neither prompted.
+writes no backend record, and since it began removing any it finds — so that the checks stay
+runnable without AWS credentials — there is usually none left to discard either. Both
+environments were initialised against the S3 backend on 2026-08-27 with the line above and
+neither prompted.
+
+That is also why the `init` line is not a first-time-only step. Any `make validate`, and so any
+commit touching a `.tf` file with the pre-commit hook installed, leaves these roots
+uninitialised; the next direct `terraform` command in one stops with `Error: Backend
+initialization required` before it reaches AWS. Every snippet below that drives terraform at an
+environment root therefore carries the line, and the `make` targets run it themselves on every
+invocation.
 
 ### 2.1 `make destroy-<env>` cannot run unattended, by design
 
@@ -85,6 +94,7 @@ attached. For the unattended case use the direct form and accept that you have r
 guard:
 
 ```bash
+terraform -chdir=envs/<env> init -input=false -backend-config=backend.hcl
 terraform -chdir=envs/<env> destroy -auto-approve -input=false
 ```
 
@@ -291,18 +301,21 @@ reading state to work out what a killed run destroyed will be misled about exact
 they are trying to account for. The distribution itself was left `Enabled: false,
 Status: InProgress`: the disable had propagated, the delete had not.
 
-### 5.3 The recovery, which is two commands
+### 5.3 The recovery, which is three commands
 
 ```bash
+terraform -chdir=envs/<env> init -input=false -backend-config=backend.hcl
 terraform -chdir=envs/<env> force-unlock <lock-id>
 terraform -chdir=envs/<env> destroy
 ```
 
 Terraform prints the lock id in the error that sent you here, and it matches the `ID` in the
-object above. The re-run takes **no special flags** — no `-refresh=false`, no `state rm`, no
-manual surgery. On 2026-08-27 the refresh reconciled the stale state, found the 9 remaining
-resources, and removed them; the whole recovery run took **26 seconds**, of which 16 were the
-remainder of the distribution's propagation.
+object above. The `init` is the ordinary one from section 2, not a recovery step: `force-unlock`
+reaches the lock through the backend, so an uninitialised root fails on the backend before it
+ever looks at the lock. Past it the re-run takes **no special flags** — no `-refresh=false`, no
+`state rm`, no manual surgery. On 2026-08-27 the refresh reconciled the stale state, found the
+9 remaining resources, and removed them; the whole recovery run took **26 seconds**, of which
+16 were the remainder of the distribution's propagation.
 
 No orphan was left by either pass. The post-destroy sweep in section 6 was run against this
 two-pass teardown precisely because a killed process and a `force-unlock` are when things get
