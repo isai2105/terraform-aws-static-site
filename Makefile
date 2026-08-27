@@ -33,8 +33,14 @@
 # on its own: drop this one and the checks stop failing on macOS, drop the
 # other and they depend on an undocumented reading of `SHELL`.
 #
+# Stating them twice also makes them unremovable, which is worth knowing
+# before it is discovered the hard way: a per-target `.SHELLFLAGS := -c`
+# opt-out silently does nothing here, because `SHELL` still carries the flags.
+# A recipe that genuinely needs a plain shell has to override `SHELL` too.
+#
 # Verified against GNU Make 3.81 (macOS 15) and GNU Make 4.3 (Ubuntu 24.04,
-# which is what `ubuntu-latest` runs).
+# which is what `ubuntu-latest` runs), including the opt-out above failing on
+# both.
 SHELL := /usr/bin/env bash -euo pipefail
 .SHELLFLAGS := -euo pipefail -c
 
@@ -230,21 +236,47 @@ fmt-check: check-terraform ## Fail if any Terraform file is not canonically form
 # configures no remote state, so this needs no bucket, no role and no AWS
 # credentials — which is what makes it safe as a required check.
 #
-# One qualification, on a working copy rather than in CI. `-backend=false` does
-# not mean "no backend"; it means "do not configure one, use what was previously
-# initialised". A fresh checkout has nothing previously initialised, which is
-# every CI run and the case the paragraph above describes. An environment
-# directory where `make plan-stage` or `make plan-prod` has run does: the S3
-# backend is recorded in its .terraform/terraform.tfstate, `init` re-uses it, and
-# initialising it validates credentials against STS. So on that one working copy
-# this target inherits whatever credential requirement the environments have —
-# here, an MFA-gated role assumption — and fails with an STS error that has
-# nothing to do with the HCL. Deleting envs/<env>/.terraform/terraform.tfstate
-# restores the credential-free behaviour and costs nothing, because the env
-# targets re-initialise the backend on every invocation anyway. Fixing it
-# properly means giving this target a TF_DATA_DIR of its own, which buys a
-# second ~800 MB copy of the AWS provider per directory; that trade is not made
-# here and is not made silently.
+# That claim is about a fresh checkout, and the `rm -f` in the loop below is
+# what keeps it true on a working copy too. `-backend=false` does not mean "no
+# backend"; it means "do not configure one, use what was previously
+# initialised". An environment directory where `make plan-stage` or
+# `make plan-prod` has run carries its S3 backend in
+# .terraform/terraform.tfstate, so `init` re-uses it — and initialising an S3
+# backend validates credentials against STS. That made the AWS-free half of
+# this file fail with an InvalidClientTokenId whenever a session had expired,
+# and made the pre-commit hook built on this target reject every commit
+# touching a .tf file, which is how it was found. CI never saw it, because a
+# fresh checkout has nothing previously initialised.
+#
+# So the record is removed before each init, and three facts make that a
+# deletion rather than a gamble. It is derived: `.terraform/` is gitignored and
+# rebuilt by `init`, and the environment targets below re-initialise on every
+# invocation by design, so nothing here depends on it surviving. It holds
+# backend *configuration* and not state — `{backend, terraform_version,
+# version}`, no resources — on a path that did hold cached remote state in
+# Terraform 0.11 and earlier, which `required_version >= 1.11` and
+# .terraform-version both refuse to run. And only envs/stage and envs/prod have
+# one at all: a local backend writes no record, so bootstrap and the example
+# root have none to remove.
+#
+# The alternative was a TF_DATA_DIR of this target's own, which is structurally
+# the cleaner answer and was measured before being rejected. It buys a second
+# copy of the providers in every directory something else also initialises —
+# 798M apiece, against 3.0G free on the machine this was written on, where
+# `make validate` duly stopped with "no space left on device". A
+# TF_PLUGIN_CACHE_DIR turns those copies into links and the cost does vanish
+# (4.0K per data directory, measured), but requiring one puts a second
+# provider-installation path behind the one target that most needs to fail only
+# for reasons about the code, and how that path interacts with the `h1:` hashes
+# recorded in each .terraform.lock.hcl is not a question this target should be
+# the first to ask.
+#
+# What the deletion costs instead: after `make validate`, a bare `terraform
+# plan` typed in envs/stage stops with "Backend initialization required" until
+# something initialises it again. Every documented path in this repository
+# already does — the plan, apply and destroy targets init on every run — so the
+# cost falls only on somebody bypassing this file, and it arrives as an error
+# telling them exactly what to do.
 #
 # One class of directory is skipped, and it is skipped because Terraform cannot
 # do what this target asks of it rather than because checking would be
@@ -291,6 +323,7 @@ validate: check-terraform ## Init (-backend=false) and validate every directory 
 			continue; \
 		fi; \
 		echo "==> $$dir"; \
+		rm -f "$$dir/.terraform/terraform.tfstate"; \
 		terraform -chdir="$$dir" init -backend=false -input=false; \
 		terraform -chdir="$$dir" validate; \
 	done <<< "$$dirs"; \

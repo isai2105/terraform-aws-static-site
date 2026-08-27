@@ -95,6 +95,26 @@ repos:
   # and the version guards, so a contributor on the wrong binary gets the
   # Makefile's message instead of a README that CI rejects.
   #
+  # Two consequences of running through `make validate` that belong here rather
+  # than only in the Makefile, because a hook fires on its own where a target is
+  # typed on purpose.
+  #
+  # None of these five reaches an AWS account, and that is now true on a working
+  # copy and not only on a fresh checkout. It was not, when this file was first
+  # written: `init -backend=false` re-uses a backend a previous `make
+  # plan-<env>` recorded, initialising an S3 backend validates credentials
+  # against STS, and the result was this hook rejecting every commit touching a
+  # .tf file the moment a session expired — a hook that hands back a failure
+  # about credentials on a commit about HCL, which teaches `--no-verify` faster
+  # than anything else in this file could. `validate` now removes that record
+  # before it initialises.
+  #
+  # The cost of that, and the one surprise this file owes a reader: after any
+  # run of this hook, a bare `terraform plan` typed inside envs/stage or
+  # envs/prod stops with "Backend initialization required". `make plan-stage`
+  # and `make plan-prod` initialise on every invocation and are unaffected; only
+  # driving terraform directly is.
+  #
   # The cost, named because everything here costs something: these run
   # repository-wide rather than on the changed directory, so the whole set takes
   # about thirteen seconds regardless of what was touched, eleven of which is
@@ -125,6 +145,13 @@ repos:
         pass_filenames: false
         files: \.(tf|tfvars|tftest\.hcl)$|^\.terraform-version$|^Makefile$
 
+      # `.tftest.hcl` is here because `terraform fmt` formats it, not because
+      # any exists yet. When the module tests land they bring a `make test`
+      # target, and its hook belongs in that same diff — the rule this file
+      # already applies to `zizmor`. A test suite whose local gate arrives a
+      # commit later is a suite that was ungated for a commit.
+
+
       # The lock files are a trigger too. `validate` runs `init` first, and
       # `init` resolves providers through .terraform.lock.hcl, so a commit that
       # refreshes a lock and nothing else — which is exactly what a scheduled
@@ -151,7 +178,10 @@ repos:
         files: \.(tf|tfvars)$|^\.trivyignore$|^Makefile$
 
       # Narrower than the rest because the target is: `docs` only regenerates
-      # READMEs under modules/, and the example roots beside them are excluded.
+      # READMEs under modules/, and it excludes the example roots beside them —
+      # the `\|/examples/|d` in the Makefile's discovery loop. The `exclude:`
+      # here is that same deletion, so the trigger covers what the target
+      # covers rather than a superset of it that happens to no-op.
       #
       # The README itself is a trigger and not only an output. The generated
       # block is the one thing here a person can plausibly edit by hand — it
@@ -164,6 +194,7 @@ repos:
         language: system
         pass_filenames: false
         files: ^modules/.*(\.tf|/README\.md)$|^\.terraform-docs\.yml$|^Makefile$
+        exclude: /examples/
 
   # -------------------------------------------------------------------------
   # actionlint — the one check here that is not a Makefile target.
@@ -182,11 +213,17 @@ repos:
   # shellcheck and pyflakes, so the hook checks what the job checks. It needs a
   # running Docker daemon, and fails loudly saying so when there is not one.
   #
-  # The gap that remains, stated rather than papered over: validate.yml pins the
-  # image by digest and this pins it by the `1.7.12` tag the upstream hooks file
-  # carries, and a tag can be moved. Restating the digest here would close it and
-  # open a worse one — a second copy of the pin, in the file least likely to be
-  # updated alongside the workflow.
+  # The gap that remains, stated rather than papered over, has two halves.
+  # validate.yml pins the image by digest and this pins it by the `1.7.12` tag
+  # the upstream hooks file carries, and a tag can be moved. And `rev:` is
+  # itself movable by one command — `pre-commit autoupdate` will raise it
+  # without touching validate.yml, which is exactly the drift between the local
+  # and CI versions of a tool that `print-tflint-version` and its two siblings
+  # exist to make impossible for the others. There is no clean fix: `rev:`
+  # cannot read the Makefile, and restating the digest here would close the
+  # first half by opening a worse one — a second copy of the pin, in the file
+  # least likely to be updated alongside the workflow. So it is accepted, and
+  # the standing obligation is that an actionlint bump is a two-file change.
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:
