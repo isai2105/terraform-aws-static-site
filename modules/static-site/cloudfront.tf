@@ -75,6 +75,15 @@ resource "aws_cloudfront_distribution" "site" {
   # the moment those error responses were narrowed.
   default_root_object = "index.html"
 
+  # The custom domain, when there is one. Empty otherwise, which leaves the
+  # distribution answering on its own *.cloudfront.net hostname only.
+  #
+  # An alias and a certificate are two halves of one thing: CloudFront rejects an
+  # alias it has no certificate covering, and certificate.tf is what guarantees
+  # the two are set together. Neither is set for any environment in this
+  # repository.
+  aliases = local.custom_domain_enabled ? [var.domain_name] : []
+
   origin {
     origin_id = local.bucket_name
 
@@ -192,19 +201,39 @@ resource "aws_cloudfront_distribution" "site" {
     }
   }
 
-  # `minimum_protocol_version` is deliberately absent rather than set low.
-  #
-  # It is not a choice this block can make. Alongside the default CloudFront
-  # certificate AWS requires the value to be TLSv1 and rejects anything higher,
-  # because the field only governs viewer connections to a custom domain; what
-  # the default *.cloudfront.net certificate negotiates is set by CloudFront's
-  # own security policy and is not configurable here at all.
-  #
-  # The commit that makes the custom domain optional is where this becomes a real
-  # decision, because an ACM certificate is the first thing that makes the field
-  # meaningful; the value there is TLSv1.2_2021.
+  # One block, four conditional arguments, rather than two `dynamic` blocks with
+  # complementary conditions. `viewer_certificate` is required exactly once, so
+  # the dynamic form would express "exactly one of these two must match" as two
+  # independent predicates that nothing checks agree — and every argument here is
+  # Optional and not Computed in the provider schema, so null genuinely means
+  # unset rather than "leave whatever is there".
   viewer_certificate {
-    cloudfront_default_certificate = true
+    # Exactly one of these two carries a value. `local.viewer_certificate_arn` is
+    # null precisely when no custom domain was asked for, which is the same
+    # condition that selects the default certificate.
+    cloudfront_default_certificate = local.custom_domain_enabled ? null : true
+    acm_certificate_arn            = local.viewer_certificate_arn
+
+    # SNI rather than a dedicated IP address. `vip` provisions dedicated IPs at
+    # the edge and is billed at roughly $600 a month for the privilege of
+    # supporting clients that predate SNI — Windows XP and Android 2.x. Nothing
+    # that can run a Vite ES-module build lacks SNI.
+    ssl_support_method = local.custom_domain_enabled ? "sni-only" : null
+
+    # Only meaningful, and only permitted, alongside a custom certificate.
+    #
+    # With the default CloudFront certificate AWS requires this to be TLSv1 and
+    # rejects anything higher — the field governs viewer connections to a custom
+    # domain, and what the *.cloudfront.net certificate negotiates is set by
+    # CloudFront's own security policy and is not configurable here at all.
+    # Leaving it null in that case is what keeps the two configurations from
+    # having to disagree about a value one of them cannot set.
+    #
+    # TLSv1.2_2021 where it does apply: the strongest policy CloudFront offers
+    # that is not TLS 1.3-only. It drops TLS 1.0 and 1.1 outright, which have
+    # been deprecated since 2021 and which nothing capable of running this
+    # application still requires.
+    minimum_protocol_version = local.custom_domain_enabled ? "TLSv1.2_2021" : null
   }
 
   # Stated rather than inherited, because the default is a decision here.

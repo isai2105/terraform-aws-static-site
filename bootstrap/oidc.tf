@@ -662,24 +662,97 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # records that validate and alias it. Both are gated behind
   # `var.domain_name != null` in the module and neither has ever been applied,
   # so these grants are the least exercised in this file.
+  #
+  # The ACM half is split across two statements, and the split is not stylistic:
+  # two AWS documents disagree about whether `acm:RequestCertificate` can be
+  # scoped to a certificate ARN, and only one of them is right.
+  #
+  #   ACM User Guide, authen-apipermissions.html   says certificate/* or *
+  #   Service Authorization Reference              resource column is EMPTY
+  #
+  # The Service Authorization Reference is generated from the IAM model itself
+  # and is the one to believe; an empty resource column means the action
+  # authorises against `*` and nothing else, so a policy naming `certificate/*`
+  # matches no request and denies every one. The User Guide page is
+  # hand-maintained, says otherwise, and is the page a search engine reaches
+  # first — which is exactly how this was written the wrong way round once
+  # already. Corroborating the Reference: AWS documents condition keys for
+  # constraining certificate issuance, and its own guidance on using them pairs
+  # them with `"Resource": "*"`. Condition keys exist here *because* ARN scoping
+  # does not.
+  #
+  # The failure this split prevents is a quiet one. `plan` reads certificates
+  # through ReadCdnAndCertificates on `*` and succeeds, so the mistake surfaces
+  # only under `apply`, on the first ACM call, in the one code path the module
+  # README states has never been applied in CI.
   statement {
     sid    = "ManageCertificates"
     effect = "Allow"
 
+    # The six that genuinely take a certificate ARN, kept scoped.
     actions = [
       "acm:AddTagsToCertificate",
       "acm:DeleteCertificate",
       "acm:DescribeCertificate",
       "acm:GetCertificate",
-      "acm:ListCertificates",
       "acm:ListTagsForCertificate",
       "acm:RemoveTagsFromCertificate",
-      "acm:RequestCertificate",
     ]
 
     # A certificate for CloudFront must live in us-east-1 whatever region the
     # rest of the environment is in, so this cannot be pinned to var.aws_region.
     resources = ["arn:${data.aws_partition.current.partition}:acm:*:${data.aws_caller_identity.current.account_id}:certificate/*"]
+  }
+
+  # Requesting the certificate, which is the call that was silently denied.
+  #
+  # `RequestCertificate` creates the certificate, so there is no ARN to name yet.
+  # What can be constrained instead is constrained: `acm:ValidationMethod` pins
+  # issuance to DNS, which is what certificate.tf hardcodes and comments at
+  # length. EMAIL validation sends approval mail to addresses at the requested
+  # domain, so without this condition the role could make AWS send mail to
+  # domains it has nothing to do with. It can never wrongly deny a legitimate
+  # call here, because the module exposes no variable for the method — and if
+  # someone later adds one, this denies it by name rather than letting it
+  # through, which is the review this file wants that change to get.
+  #
+  # Named residual, because neither the enumeration nor the condition closes it:
+  # `acm:DomainNames` would restrict *which* domains may be requested, and is
+  # deliberately not set. The bootstrap cannot know them — the domain is a
+  # per-environment module input, absent entirely in the default configuration —
+  # so setting it would mean a bootstrap variable and a bootstrap re-apply every
+  # time an environment's domain changed, to constrain a path that has never
+  # been applied. What stays open is requesting a DNS-validated certificate for
+  # an arbitrary domain: it issues nothing without control of that domain's DNS,
+  # and it consumes the account's certificate-request quota.
+  statement {
+    sid       = "RequestCertificates"
+    effect    = "Allow"
+    actions   = ["acm:RequestCertificate"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "acm:ValidationMethod"
+      values   = ["DNS"]
+    }
+  }
+
+  # Its own statement, because the condition above would deny it.
+  #
+  # `ListCertificates` is an account-level enumeration that carries no
+  # ValidationMethod key, and an IAM condition on an absent key evaluates false —
+  # so folding this in above would have replaced one silent denial with another.
+  # Nothing in the module calls it today: the provider refreshes a certificate by
+  # ARN through DescribeCertificate, never by listing. It is granted because a
+  # certificate data source is the ordinary next step on this path, and because a
+  # read-only enumeration of certificate metadata is the least of what this role
+  # already holds — not because anything currently needs it.
+  statement {
+    sid       = "ListCertificates"
+    effect    = "Allow"
+    actions   = ["acm:ListCertificates"]
+    resources = ["*"]
   }
 
   statement {
