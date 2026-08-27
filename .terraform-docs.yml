@@ -1,0 +1,68 @@
+# terraform-docs — the half of a module's README that no one should be writing
+# by hand.
+#
+# A module's interface is its variables and its outputs, and both change. The
+# prose above the generated block is the part a person has to write: why the
+# `aws.us_east_1` provider is required, what the naming contract buys, which
+# paths have never been applied. The tables below it are a mechanical
+# restatement of the `.tf` files, and a mechanical restatement kept by hand is a
+# restatement that is wrong within three commits.
+#
+# So the tables are generated, and `make docs-check` — a required status check —
+# fails a pull request whose generated block does not match its `.tf` files.
+# Generation without the check would be worse than nothing: it would put a
+# table that looks authoritative next to code that had moved on.
+#
+# The Makefile owns the invocation, as it does for every other check here, and
+# passes this file in by absolute path. terraform-docs resolves a relative
+# `--config` and the `output.file` below against each directory it is pointed
+# at, so a relative path here would silently find nothing.
+
+formatter: markdown table
+
+sections:
+  hide:
+    # The header and footer sections would lift a comment out of a `.tf` file
+    # and paste it above the tables. Both are hidden because the prose in the
+    # README is written for a reader of the README, and duplicating a file
+    # header into it creates a second copy that goes stale in exactly the way
+    # this file exists to prevent.
+    - header
+    - footer
+
+sort:
+  enabled: true
+
+  # Required inputs first, then optional, each group alphabetical. A reader
+  # arriving at this table wants to know what they must supply before what they
+  # may; alphabetical order alone answers the second question and buries the
+  # first.
+  by: required
+
+settings:
+  # No `<a name="input_x"></a>` anchors. terraform-docs escapes the underscore
+  # in the link it generates alongside them — `[name_prefix](#input\_name\_prefix)`
+  # — so the fragment does not match the anchor and every one of those links is
+  # broken. A table of broken links is worse than a table of plain names.
+  anchor: false
+
+  # A module with no submodules should not carry a "Modules — No modules."
+  # heading. Sections reappear on their own when there is something to put in
+  # them, because the block is regenerated rather than maintained.
+  hide-empty: true
+
+  # Report the provider *constraints* the module declares, never the versions a
+  # lock file happens to record. A child module does not own a lock file, but
+  # anyone who runs `terraform init` inside one leaves a `.terraform.lock.hcl`
+  # behind — and with lockfile reading on, that file would silently change the
+  # generated table and fail the check for a reason having nothing to do with
+  # the commit. The constraint is also the honest answer: it is what the module
+  # promises a caller, and the resolved version belongs to the root.
+  lockfile: false
+
+output:
+  file: README.md
+
+  # Inject between the BEGIN_TF_DOCS/END_TF_DOCS markers rather than replacing
+  # the file. Everything above them is hand-written and stays.
+  mode: inject

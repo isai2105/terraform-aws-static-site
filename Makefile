@@ -9,9 +9,9 @@
 # arrived with the commit that created the directory they point at; `test`
 # arrives with the module tests.
 #
-# The file is in two halves. Everything down to `scan` is a check: it reaches no
-# AWS account, needs no credentials, and is safe to require on a pull request.
-# Everything after it talks to AWS.
+# The file is in two halves. Everything down to `docs-check` is a check: it
+# reaches no AWS account, needs no credentials, and is safe to require on a pull
+# request. Everything after it talks to AWS.
 
 # Bash rather than /bin/sh, with `-e -u -o pipefail`, so a command that fails
 # inside a loop or a pipeline fails the target instead of being swallowed.
@@ -48,11 +48,26 @@ TRIVY_VERSION := 0.74.0
 # nothing the moment `scan` is invoked from anywhere but the repository root.
 TRIVY_IGNOREFILE := $(CURDIR)/.trivyignore
 
-.PHONY: help fmt fmt-check validate lint scan \
+# And terraform-docs, for the third time and the same reason: no version file of
+# its own, so this is the pin and validate.yml reads it back through
+# `print-terraform-docs-version`. It matters more here than it looks. The output
+# of a documentation generator is compared byte for byte by `docs-check`, so a
+# release that changes a table's spacing turns every pull request red until
+# somebody regenerates — and the diff that fixes it says nothing about why.
+TERRAFORM_DOCS_VERSION := 0.24.0
+
+# Absolute for the same reason as the two paths above, and for one more:
+# terraform-docs resolves a relative --config against the directory it is
+# pointed at, not the working directory, so a relative path would look for the
+# config inside each module and fall back to built-in defaults on not finding
+# it — a different table, generated in silence.
+TERRAFORM_DOCS_CONFIG := $(CURDIR)/.terraform-docs.yml
+
+.PHONY: help fmt fmt-check validate lint scan docs docs-check \
 	plan-stage apply-stage destroy-stage \
 	plan-prod apply-prod destroy-prod \
-	check-terraform check-tflint check-trivy \
-	print-tflint-version print-trivy-version
+	check-terraform check-tflint check-trivy check-terraform-docs \
+	print-tflint-version print-trivy-version print-terraform-docs-version
 
 help: ## Show the available targets.
 	@echo "Usage: make <target>"
@@ -64,6 +79,7 @@ help: ## Show the available targets.
 	@echo "terraform pinned by .terraform-version: $(TERRAFORM_VERSION)"
 	@echo "tflint pinned by this Makefile:         $(TFLINT_VERSION)"
 	@echo "trivy pinned by this Makefile:          $(TRIVY_VERSION)"
+	@echo "terraform-docs pinned by this Makefile: $(TERRAFORM_DOCS_VERSION)"
 
 # Internal guard, deliberately absent from `help`: not a check in its own right,
 # but a prerequisite of every target that shells out to terraform. Running a
@@ -138,6 +154,32 @@ check-trivy:
 		exit 1; \
 	fi
 
+# And once more for terraform-docs, where the guard is doing more work than the
+# other two. tflint and trivy disagree with an unpinned binary by reporting a
+# finding nobody asked for; terraform-docs disagrees by rewriting a README, so
+# an unguarded `make docs` on the wrong version produces a diff that passes
+# review as noise and then fails `docs-check` in CI against the pinned one.
+check-terraform-docs:
+	@if ! command -v terraform-docs >/dev/null 2>&1; then \
+		echo "make: terraform-docs was not found on PATH." >&2; \
+		echo "      this repository pins terraform-docs $(TERRAFORM_DOCS_VERSION)." >&2; \
+		echo "      install it with:  brew install terraform-docs" >&2; \
+		echo "                   or:  from https://github.com/terraform-docs/terraform-docs/releases/tag/v$(TERRAFORM_DOCS_VERSION)" >&2; \
+		exit 1; \
+	fi; \
+	out="$$(terraform-docs --version)"; \
+	actual="$${out#terraform-docs version v}"; \
+	actual="$${actual%% *}"; \
+	if [ "$$actual" != "$(TERRAFORM_DOCS_VERSION)" ]; then \
+		echo "make: terraform-docs version mismatch." >&2; \
+		echo "      expected $(TERRAFORM_DOCS_VERSION)  (pinned in the Makefile)" >&2; \
+		echo "      found    $$actual  ($$(command -v terraform-docs))" >&2; \
+		echo "      terraform-docs has no version manager, so pick the matching build:" >&2; \
+		echo "        brew upgrade terraform-docs   (when the formula is at $(TERRAFORM_DOCS_VERSION))" >&2; \
+		echo "        https://github.com/terraform-docs/terraform-docs/releases/tag/v$(TERRAFORM_DOCS_VERSION)" >&2; \
+		exit 1; \
+	fi
+
 # Also internal: the one place validate.yml can ask which tflint this
 # repository pins, so the workflow and the guard cannot disagree.
 print-tflint-version:
@@ -147,6 +189,10 @@ print-tflint-version:
 # installed binary and the version check-trivy demands are the same number.
 print-trivy-version:
 	@echo "$(TRIVY_VERSION)"
+
+# And for terraform-docs.
+print-terraform-docs-version:
+	@echo "$(TERRAFORM_DOCS_VERSION)"
 
 # Formatting is purely textual, so it is correct from the repository root and
 # recursive: no per-directory initialisation is involved. `terraform fmt` skips
@@ -269,6 +315,66 @@ scan: check-trivy ## Scan every Terraform file for misconfigurations with Trivy.
 		--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
 		--ignorefile "$(TRIVY_IGNOREFILE)" \
 		--skip-check-update
+
+# The inputs and outputs tables in each module's README, generated from the .tf
+# files and injected between the BEGIN_TF_DOCS/END_TF_DOCS markers. `docs`
+# rewrites them; `docs-check` fails instead of rewriting, which is the form CI
+# runs — a job that regenerated and pushed would be a gate that reports green on
+# work it did itself.
+#
+# Targets are discovered rather than listed, for the reason `validate` above
+# gives: a list authored against the modules that exist today stops covering the
+# ones added tomorrow, and a documentation check that silently covers nothing is
+# indistinguishable from one that passes.
+#
+# Two kinds of directory under modules/ are deliberately not the same thing. A
+# module publishes an interface — variables in, outputs out — and that interface
+# is what these tables document. An `examples/<name>/` root beside it publishes
+# none: it is a caller, written to be read as HCL, and it exists so that
+# `validate` has a root through which to type-check a module declaring
+# `configuration_aliases`. Generating a table of "no inputs" and one output for
+# it would add a second README to keep current and document nothing, so the
+# examples are excluded here — while remaining fully covered by fmt, validate,
+# lint and scan, which is where an example root can actually be wrong.
+#
+# The exclusion is a `sed` delete rather than a `grep -v` because `pipefail` is
+# on: `grep` exits 1 when it filters everything away, which would abort the
+# recipe with no message on the one case the empty check below exists to
+# report. `sed` returns 0 whether it deleted a line or not.
+#
+# $(1) is the extra flag, empty for generation and --output-check for the gate.
+define terraform_docs
+	@dirs="$$(find modules -type d -name .terraform -prune -o -type f -name '*.tf' -print \
+		| sed -e 's|/[^/]*$$||' -e '\|/examples/|d' \
+		| sort -u)"; \
+	if [ -z "$$dirs" ]; then \
+		echo "no modules found under modules/; nothing to document"; \
+		exit 0; \
+	fi; \
+	while IFS= read -r dir; do \
+		echo "==> $$dir"; \
+		if ! terraform-docs --config "$(TERRAFORM_DOCS_CONFIG)" $(1) "$$dir"; then \
+			echo "" >&2; \
+			echo "make: terraform-docs failed on $$dir." >&2; \
+			echo "      From docs-check that means README.md no longer matches the .tf" >&2; \
+			echo "      files beside it. The block between the BEGIN_TF_DOCS and" >&2; \
+			echo "      END_TF_DOCS markers is generated, so it is regenerated rather" >&2; \
+			echo "      than edited:" >&2; \
+			echo "" >&2; \
+			echo "        make docs" >&2; \
+			echo "" >&2; \
+			echo "      To change what it says, edit the description on the variable" >&2; \
+			echo "      or output in question and regenerate." >&2; \
+			exit 1; \
+		fi; \
+	done <<< "$$dirs"
+endef
+
+docs: check-terraform-docs ## Regenerate the terraform-docs block in every module README.
+	$(call terraform_docs,)
+
+docs-check: check-terraform-docs ## Fail if any module README's generated block is out of date.
+	$(call terraform_docs,--output-check)
 
 # ---------------------------------------------------------------------------
 # The environment targets

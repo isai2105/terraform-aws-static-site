@@ -28,7 +28,7 @@ output "distribution_arn" {
 }
 
 output "distribution_domain_name" {
-  description = "The distribution's own *.cloudfront.net hostname, without a scheme. Regenerated on every apply."
+  description = "The distribution's own `*.cloudfront.net` hostname, without a scheme. Regenerated on every apply."
   value       = aws_cloudfront_distribution.site.domain_name
 }
 
