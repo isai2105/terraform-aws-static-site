@@ -43,6 +43,21 @@ output "site_url" {
   value = "https://${aws_cloudfront_distribution.site.domain_name}"
 }
 
+output "content_security_policy" {
+  description = "The Content-Security-Policy header this distribution serves, exactly as the response headers policies set it. Published so that a test can assert the live header against the value the policies were built from rather than against a second copy of the string."
+
+  # This output exists for the end-to-end workflow, which asserts that the
+  # header CloudFront actually serves matches the policy this module
+  # configured. Two copies of this string across two repositories is the
+  # irreducible cost of neither repository cloning the other; a third copy
+  # inside this one, written into a test, would be an unforced error — it would
+  # pass while describing a distribution nobody had checked.
+  #
+  # The environment roots re-export this for the workflow to read with
+  # `terraform output`.
+  value = local.csp
+}
+
 output "access_log_group_name" {
   description = "Name of the CloudWatch Logs group receiving CloudFront access logs. In us-east-1 regardless of the environment's own region, because CloudFront's logging control plane answers only there."
   value       = aws_cloudwatch_log_group.access_logs.name

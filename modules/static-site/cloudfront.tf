@@ -8,32 +8,21 @@
 # and adds no features to OAI. `always` signs every origin request rather than
 # only those without an Authorization header, which is what allows the bucket
 # policy in s3.tf to name a single SourceArn and trust nothing else.
+#
+# This resource is untaggable too (see the tagging note in policies.tf), and
+# unlike the policies there its name carries the bucket's random suffix — so a
+# leaked OAC is invisible to the tag-based teardown assertion *and* collides
+# with nothing on the next apply, leaving it the one resource here that no
+# automatic check detects. The name is left alone rather than made stable
+# because the quota is 100 per account against the policies' 20, so the
+# accumulation pressure is an order of magnitude lower; a sweep by name prefix
+# finds it if that ever stops being true.
 resource "aws_cloudfront_origin_access_control" "site" {
   name                              = local.bucket_name
   description                       = "Signs CloudFront origin requests to the ${var.environment} site bucket."
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
-}
-
-# The managed cache policy this distribution uses until the split policies
-# arrive.
-#
-# Resolved by name through a data source rather than hardcoded as the UUID
-# 658327ea-f89d-4fab-a63d-7e88639e58f6, which is the form most examples use. The
-# UUID is stable, but it is also opaque: a reader cannot tell what it selects,
-# and a typo in it produces a distribution that behaves subtly differently
-# rather than an error.
-#
-# CachingOptimized is the right interim choice — it caches on the URI alone,
-# forwards no cookies or headers, and honours the origin's Cache-Control — but it
-# is interim. It applies one TTL to the whole distribution, and a real SPA host
-# needs two: hashed assets immutable for a year, and index.html revalidated on
-# every request. The commit that adds SPA routing replaces this data source with
-# the module's own pair of cache policies and the response headers policies that
-# carry the browser-facing Cache-Control, which no cache policy can emit.
-data "aws_cloudfront_cache_policy" "caching_optimized" {
-  name = "Managed-CachingOptimized"
 }
 
 # Accepted: no AWS WAF web ACL in front of this distribution.
@@ -97,6 +86,9 @@ resource "aws_cloudfront_distribution" "site" {
     origin_access_control_id = aws_cloudfront_origin_access_control.site.id
   }
 
+  # The document, and everything that is not a hashed asset. Revalidated at the
+  # edge and marked `no-cache` to the browser, so a viewer always lands on the
+  # current build.
   default_cache_behavior {
     target_origin_id = local.bucket_name
 
@@ -116,7 +108,79 @@ resource "aws_cloudfront_distribution" "site" {
     # Brotli and gzip at the edge, on a payload that is almost entirely text.
     compress = true
 
-    cache_policy_id = data.aws_cloudfront_cache_policy.caching_optimized.id
+    cache_policy_id            = aws_cloudfront_cache_policy.site["default"].id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.site["default"].id
+  }
+
+  # The hashed assets Vite emits, held at the edge for a year and marked
+  # `immutable` to the browser.
+  #
+  # A separate behaviour rather than a longer TTL on the default one, because
+  # the two halves of a built SPA have opposite requirements: the document must
+  # never be stale and the assets can never *become* stale, since a new build
+  # writes new filenames rather than new content at the same URL.
+  ordered_cache_behavior {
+    path_pattern     = "/assets/*"
+    target_origin_id = local.bucket_name
+
+    allowed_methods = ["GET", "HEAD"]
+    cached_methods  = ["GET", "HEAD"]
+
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+
+    cache_policy_id            = aws_cloudfront_cache_policy.site["assets"].id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.site["assets"].id
+  }
+
+  # SPA routing, by way of the error path — the canonical CloudFront pattern,
+  # and knowingly incomplete.
+  #
+  # A client-side route like /projects/x is not an object in the bucket. The
+  # origin therefore refuses it, and these two mappings turn that refusal into
+  # the application shell with a 200, letting the router resolve the path in the
+  # browser. Returning the origin's status instead would have search engines
+  # deindex every route the application defines.
+  #
+  # Both codes, not just 404. An OAC bucket answers a request for a missing key
+  # with 403 rather than 404, because the bucket policy grants s3:GetObject
+  # without s3:ListBucket and S3 withholds key-existence information from a
+  # caller that may not enumerate — see the reasoning on that grant in s3.tf. A
+  # configuration mapping only 404 would therefore map nothing at all here.
+  #
+  # What makes this incomplete is that CustomErrorResponses is defined once per
+  # distribution and applies to every cache behaviour; it cannot be scoped to
+  # the default one. So a request for a missing hashed chunk under /assets/ is
+  # also answered with index.html and a 200 — HTML where the browser expects
+  # JavaScript. The browser throws a parse error, monitoring sees a healthy 200,
+  # and the failure is close to undiagnosable. That is the standard trap of this
+  # pattern and it is exactly what a partial deploy produces.
+  #
+  # It is left in place deliberately rather than pre-empted. No plan-time test
+  # can observe it: only a live request for a missing key can, and the
+  # end-to-end workflow is the first thing in this repository that makes one.
+  # The commit that follows that demonstration replaces both of these mappings
+  # with a viewer-request function, which is the only mechanism that can tell a
+  # route from an asset before the origin is consulted.
+  dynamic "custom_error_response" {
+    for_each = toset([403, 404])
+
+    content {
+      error_code         = custom_error_response.value
+      response_code      = 200
+      response_page_path = "/index.html"
+
+      # Stated rather than inherited, because the default is a decision here.
+      #
+      # CloudFront otherwise caches an error response at the edge for ten
+      # seconds. That mapping is keyed on the requested path, so a path that
+      # 403s now and exists moments later — which is precisely what the
+      # documented deploy sequence produces, since assets are uploaded before
+      # the index.html that references them — would keep being answered with
+      # the shell after the real object had landed. Zero costs an extra origin
+      # round trip on a path that is about to stop taking this route entirely.
+      error_caching_min_ttl = 0
+    }
   }
 
   # No geographic restriction. Declared explicitly because the block is required
