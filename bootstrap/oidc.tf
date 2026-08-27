@@ -518,10 +518,24 @@ resource "aws_iam_role" "apply" {
 
   assume_role_policy = data.aws_iam_policy_document.apply_assume_role.json
 
-  # Longer than plan's, and for a specific reason: destroying a CloudFront
-  # distribution is a 15-to-20 minute AWS-side wait, and the provider's own
-  # waiter runs to 90 minutes. Credentials that expire mid-destroy leave the
-  # distribution half-removed and the state lock held.
+  # Longer than plan's, because credentials that expire mid-destroy leave the
+  # distribution half-removed and the state lock held — the failure walked in
+  # docs/TEARDOWN.md section 5.
+  #
+  # The number is headroom, not a measurement. An earlier version of this
+  # comment justified it with a 15-to-20 minute CloudFront teardown, which was
+  # inherited rather than observed: measured on 2026-08-27 across three
+  # distributions, a distribution tears down in about three minutes and a
+  # whole 17-resource environment in about the same, so this ceiling is
+  # roughly forty times what a destroy needs. It stays at two hours, because the
+  # provider's own waiter runs to 90 minutes, a slow day at AWS costs nothing
+  # to survive, and the only thing a lower ceiling would buy is a shorter
+  # window on a credential that is already scoped to one environment and one
+  # workflow run. docs/TEARDOWN.md carries the measurement and its date.
+  #
+  # Reachable only through AssumeRoleWithWebIdentity, which is how CI assumes
+  # this role. A role assumed from another session is capped by AWS at one hour
+  # whatever this says.
   max_session_duration = 7200
 }
 
