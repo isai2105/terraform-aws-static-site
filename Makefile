@@ -15,7 +15,27 @@
 
 # Bash rather than /bin/sh, with `-e -u -o pipefail`, so a command that fails
 # inside a loop or a pipeline fails the target instead of being swallowed.
-SHELL := /usr/bin/env bash
+#
+# The flags are stated twice, and the repetition is deliberate. `.SHELLFLAGS`
+# is their documented home and it arrived in GNU Make 3.82; macOS ships 3.81 —
+# the last GPLv2 release and the newest Apple will distribute — which parses
+# the variable and then ignores it. So every recipe below ran under a plain
+# `bash -c` on a macOS clone while running under `bash -euo pipefail -c` in CI,
+# and the two invocation paths this file exists to keep identical disagreed
+# about whether a check had failed. Not hypothetically: `validate` looped over
+# seven directories, printed `terraform validate` errors from three of them,
+# and exited 0.
+#
+# A `SHELL` carrying its own arguments is honoured by both, because make builds
+# the shell's argv by splitting this variable on whitespace. 3.81 takes the
+# flags from here; 3.82 and later take them from both places, where a repeated
+# `-euo pipefail` means what it meant the first time. Neither line is redundant
+# on its own: drop this one and the checks stop failing on macOS, drop the
+# other and they depend on an undocumented reading of `SHELL`.
+#
+# Verified against GNU Make 3.81 (macOS 15) and GNU Make 4.3 (Ubuntu 24.04,
+# which is what `ubuntu-latest` runs).
+SHELL := /usr/bin/env bash -euo pipefail
 .SHELLFLAGS := -euo pipefail -c
 
 .DEFAULT_GOAL := help
@@ -209,6 +229,22 @@ fmt-check: check-terraform ## Fail if any Terraform file is not canonically form
 # of this repository never holds a .tf file at all. `init -backend=false`
 # configures no remote state, so this needs no bucket, no role and no AWS
 # credentials — which is what makes it safe as a required check.
+#
+# One qualification, on a working copy rather than in CI. `-backend=false` does
+# not mean "no backend"; it means "do not configure one, use what was previously
+# initialised". A fresh checkout has nothing previously initialised, which is
+# every CI run and the case the paragraph above describes. An environment
+# directory where `make plan-stage` or `make plan-prod` has run does: the S3
+# backend is recorded in its .terraform/terraform.tfstate, `init` re-uses it, and
+# initialising it validates credentials against STS. So on that one working copy
+# this target inherits whatever credential requirement the environments have —
+# here, an MFA-gated role assumption — and fails with an STS error that has
+# nothing to do with the HCL. Deleting envs/<env>/.terraform/terraform.tfstate
+# restores the credential-free behaviour and costs nothing, because the env
+# targets re-initialise the backend on every invocation anyway. Fixing it
+# properly means giving this target a TF_DATA_DIR of its own, which buys a
+# second ~800 MB copy of the AWS provider per directory; that trade is not made
+# here and is not made silently.
 #
 # One class of directory is skipped, and it is skipped because Terraform cannot
 # do what this target asks of it rather than because checking would be
