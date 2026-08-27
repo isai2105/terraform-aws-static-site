@@ -61,7 +61,7 @@ sts:GetCallerIdentity
 
 Most people will run this as an account administrator, which is fine for a one-shot manual
 step. The list is here for anyone who cannot. Add the matching `Delete*` actions if you intend
-to walk the teardown in section 9.
+to walk the bootstrap teardown in `docs/TEARDOWN.md`.
 
 ## 2. Fill in `bootstrap/terraform.tfvars`
 
@@ -307,73 +307,35 @@ aws s3api get-object --bucket "$BUCKET" \
 ```
 
 It names the operation, the user, the creation time and the lock id. Terraform prints the same
-id in the error that sent you here. Then, from the environment root:
+id in the error that sent you here. **`Operation` reads `OperationTypeApply` even for a
+destroy** — a destroy is an apply of a destroy plan — so it tells you a run was in progress and
+not which direction it was going. Then, from the environment root:
 
 ```bash
 terraform -chdir=envs/<env> force-unlock <lock-id>
 ```
 
+`docs/TEARDOWN.md` section 5 walks this end to end against a real killed destroy, including why
+the state file cannot be trusted to say what that run removed.
+
 ### 9.2 Everything else
 
-Environment teardown, the destroy order across repositories, the measured CloudFront teardown
-duration and the post-destroy orphan checklist live in `docs/TEARDOWN.md`. This file covers the
-bootstrap layer only.
+Teardown lives in `docs/TEARDOWN.md` — the destroy order across the three layers, the measured
+CloudFront teardown duration, the post-destroy orphan checklist, and the two-phase removal of
+this root's own `prevent_destroy` guard. This file covers standing the platform up.
 
 ## 10. Tearing down the bootstrap
 
-The state bucket and the OIDC provider are the only things in this design that outlive a cycle.
-Removing them is a two-phase procedure, and the first phase is a hand edit that is never
-committed.
+The state bucket and the OIDC provider are the only things in this design that outlive a cycle,
+and removing them is the last step of a teardown rather than an operation of its own. The full
+procedure — every environment destroyed and swept first, the versioned bucket emptied, then the
+uncommitted `prevent_destroy` hand edit and the `git checkout -- bootstrap/state.tf` that
+reverts it — is `docs/TEARDOWN.md` section 8, where it sits in the order it has to run in.
 
-**Phase 1 — empty the bucket.** A versioned bucket refuses to delete while any version or
-delete marker remains, and `aws s3 rm --recursive` removes neither.
-
-```bash
-BUCKET="$(terraform -chdir=bootstrap output -raw state_bucket_name)"
-
-# Object versions first, then the delete markers left over them. Each API call
-# handles at most 1000 keys, so both loop until the bucket reports none left.
-while [ "$(aws s3api list-object-versions --bucket "$BUCKET" \
-            --query 'length(Versions || `[]`)' --output text)" != "0" ]; do
-  aws s3api delete-objects --bucket "$BUCKET" --delete "$(
-    aws s3api list-object-versions --bucket "$BUCKET" \
-      --query '{Objects: Versions[].{Key: Key, VersionId: VersionId}}' \
-      --output json)" > /dev/null
-done
-
-while [ "$(aws s3api list-object-versions --bucket "$BUCKET" \
-            --query 'length(DeleteMarkers || `[]`)' --output text)" != "0" ]; do
-  aws s3api delete-objects --bucket "$BUCKET" --delete "$(
-    aws s3api list-object-versions --bucket "$BUCKET" \
-      --query '{Objects: DeleteMarkers[].{Key: Key, VersionId: VersionId}}' \
-      --output json)" > /dev/null
-done
-```
-
-Destroy every environment before you do this. Emptying the state bucket while an environment
-still stands strands its infrastructure with nothing left that knows how to remove it.
-
-**Phase 2 — remove the guard, destroy, put the guard back.** `bootstrap/state.tf` carries
-`lifecycle { prevent_destroy = true }` on the bucket, and `lifecycle` meta-arguments accept no
-variables and no expressions — so this cannot be a flag, a `-var` or an environment switch. It
-is a hand edit, in the working tree, reverted immediately afterwards:
-
-```bash
-# 1. Edit bootstrap/state.tf and delete the `prevent_destroy = true` line.
-terraform -chdir=bootstrap destroy
-
-# 2. Immediately, and without staging anything in between:
-git checkout -- bootstrap/state.tf
-```
-
-**That edit is never committed.** A repository whose history contains "remove the state
-bucket's guard" is a repository where a revert, a cherry-pick or a copy-paste removes it again
-on a day nobody intended to. The friction is the guard: it is what stops an accidental
-`destroy` from taking the state with it.
-
-If you imported a pre-existing OIDC provider in section 3, run
-`terraform -chdir=bootstrap state rm aws_iam_openid_connect_provider.github` before the destroy
-so it survives.
+One caveat belongs here too, because it is a consequence of section 3: if you imported a
+pre-existing OIDC provider rather than creating one, it has to be removed from state before that
+destroy or it goes with the rest, taking GitHub OIDC away from everything else in the account
+that uses it. `docs/TEARDOWN.md` section 8 carries the command at the point it is needed.
 
 ---
 

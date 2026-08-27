@@ -59,14 +59,19 @@ module "site" {
   # tears it down. With `force_destroy = false`, the first teardown after a
   # successful app deploy fails on BucketNotEmpty, and it fails at the worst
   # point in the graph: the distribution takes the bucket as its origin, so
-  # Terraform removes the distribution first — fifteen to twenty minutes of it —
-  # and only then reaches a bucket it is not allowed to empty. What is left is a
-  # half-destroyed environment that every subsequent `destroy` fails on
-  # identically until someone empties the bucket by hand, and a teardown
-  # interrupted anywhere in that window — a CI job timeout is the obvious one —
-  # strands the distribution itself, which is the orphan nothing in this
-  # repository can see once its state is gone. A guardrail that guarantees a
-  # broken teardown under this operating model is theatre, not safety.
+  # Terraform removes the distribution first — about three minutes of it, now
+  # that it has been measured — and only then reaches a bucket it is not
+  # allowed to empty. That ordering is now observed rather than argued: the
+  # bucket policy is destroyed before the distribution and the bucket after it,
+  # so the failure can only arrive once the whole wait has been spent
+  # (docs/TEARDOWN.md section 4).
+  # What is left is a half-destroyed environment that every subsequent
+  # `destroy` fails on identically until someone empties the bucket by hand,
+  # and a teardown interrupted anywhere in that window — a CI job timeout is
+  # the obvious one — strands the distribution itself, which is the orphan
+  # nothing in this repository can see once its state is gone. A guardrail
+  # that guarantees a broken teardown under this operating model is theatre,
+  # not safety.
   #
   # This is the module's one refused default, and it refuses for good reason: it
   # converts "destroy declined to remove a bucket holding data" — a safe, loud,
