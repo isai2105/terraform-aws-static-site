@@ -151,6 +151,27 @@ locals {
     "arn:${data.aws_partition.current.partition}:logs:us-east-1:${data.aws_caller_identity.current.account_id}:log-group:/aws/vendedlogs/cloudfront/${local.site_bucket_prefix}-*",
     "arn:${data.aws_partition.current.partition}:logs:us-east-1:${data.aws_caller_identity.current.account_id}:log-group:/aws/vendedlogs/cloudfront/${local.site_bucket_prefix}-*:*",
   ]
+
+  # The distributions whose logs may be delivered, for the source-side half of
+  # vended-log delivery below.
+  #
+  # No region, and the empty field is correct rather than a typo: CloudFront is
+  # global and AWS documents the distribution ARN as
+  # `arn:aws:cloudfront::<account>:distribution/<id>`. The two colons are the
+  # region field, present and empty.
+  #
+  # `distribution/*` rather than a named id, because a distribution id is
+  # assigned by AWS and a fresh one is minted on every cycle — the same reason
+  # the site bucket grant is a prefix pattern. It could be tightened further
+  # with an `aws:ResourceTag/Project` condition, which this resource type
+  # supports; that is deliberately not done here because it would make the grant
+  # depend on tag propagation having completed at the instant PutDeliverySource
+  # is called, turning a permission problem into an intermittent one. The
+  # neighbouring CloudFront grant already accepts account-wide scope for the
+  # same operating-model reason it states.
+  site_distribution_arns = [
+    "arn:${data.aws_partition.current.partition}:cloudfront::${data.aws_caller_identity.current.account_id}:distribution/*",
+  ]
 }
 
 # ---------------------------------------------------------------------------
@@ -828,6 +849,9 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   #
   # None of the delivery APIs supports a resource-level condition, which is why
   # this statement is `*` and the actions are enumerated instead.
+  #
+  # The CloudWatch Logs half is not sufficient on its own — see the statement
+  # directly below, which is the half a plan cannot discover.
   statement {
     sid    = "ManageLogDelivery"
     effect = "Allow"
@@ -838,6 +862,14 @@ data "aws_iam_policy_document" "apply_infrastructure" {
       "logs:DeleteDeliveryDestination",
       "logs:DeleteDeliveryDestinationPolicy",
       "logs:DeleteDeliverySource",
+
+      # In AWS's documented ListAccessForLogDeliveryActions set alongside the
+      # three Describe* calls below. This apply never reached it — it failed one
+      # call earlier — so it is granted on the documentation's authority rather
+      # than on an observed denial, and that is stated rather than glossed:
+      # discovering it later costs another failed apply, for a list-only action
+      # over AWS-published delivery templates that exposes nothing.
+      "logs:DescribeConfigurationTemplates",
       "logs:DescribeDeliveries",
       "logs:DescribeDeliveryDestinations",
       "logs:DescribeDeliverySources",
@@ -855,6 +887,36 @@ data "aws_iam_policy_document" "apply_infrastructure" {
     ]
 
     resources = ["*"]
+  }
+
+  # The source-side half of vended-log delivery, and the half no plan can find.
+  #
+  # PutDeliverySource is a CloudWatch Logs call, but AWS authorises it against
+  # the service that *owns the resource being logged* as well: some services
+  # require "explicit authorization that customers are allowed to send logs from
+  # their resources, as an additional layer of security", expressed as a
+  # permission-only action named <service>:AllowVendedLogDeliveryForResource.
+  # CloudFront is one of them. Without this the call fails with an
+  # AccessDeniedException naming a cloudfront: action, from an API in a
+  # different service, on a role whose logs: grants are complete.
+  #
+  # It is permission-only in the strict sense: it appears in CloudFront's
+  # Service Authorization Reference with IsPermissionManagement set and in none
+  # of its Operations, so no CloudFront API call maps to it and nothing but an
+  # identity policy can grant it. Its one resource type is `distribution`, which
+  # is why this is scoped rather than `*`.
+  #
+  # This is the first defect in this repository that only a real apply could
+  # find, and the reason is worth keeping: `terraform plan` was clean for both
+  # environments against this exact role. A plan never calls PutDeliverySource,
+  # so no amount of planning, linting or scanning could have reached it. It cost
+  # a 15-resource partial apply to discover.
+  statement {
+    sid    = "ServiceLevelAccessForLogDelivery"
+    effect = "Allow"
+
+    actions   = ["cloudfront:AllowVendedLogDeliveryForResource"]
+    resources = local.site_distribution_arns
   }
 
   # Vended log delivery authorises itself through an account-level CloudWatch
