@@ -112,8 +112,10 @@ repos:
   # The cost of that, and the one surprise this file owes a reader: after any
   # run of this hook, a bare `terraform plan` typed inside envs/stage or
   # envs/prod stops with "Backend initialization required". `make plan-stage`
-  # and `make plan-prod` initialise on every invocation and are unaffected; only
-  # driving terraform directly is.
+  # and `make plan-prod` initialise on every invocation and are unaffected, and
+  # so is every snippet in docs/TEARDOWN.md and docs/BOOTSTRAP.md that drives
+  # terraform at an environment root, because each of those now carries its own
+  # init line. Anything else driving terraform directly is on its own.
   #
   # The cost, named because everything here costs something: these run
   # repository-wide rather than on the changed directory, so the whole set takes
@@ -138,19 +140,18 @@ repos:
       # commit that moves it should run `check-terraform` and find out whether
       # the installed binary moved with it. Every hook here triggers on the
       # Makefile for the same reason, that being where the other three pins are.
+      #
+      # `.tftest.hcl` is in the pattern because `terraform fmt` formats it, not
+      # because any exists yet. When the module tests land they bring a `make
+      # test` target, and its hook belongs in that same diff — the rule this
+      # file already applies to `zizmor`. A test suite whose local gate arrives
+      # a commit later is a suite that was ungated for a commit.
       - id: terraform-fmt
         name: terraform fmt
         entry: make fmt
         language: system
         pass_filenames: false
         files: \.(tf|tfvars|tftest\.hcl)$|^\.terraform-version$|^Makefile$
-
-      # `.tftest.hcl` is here because `terraform fmt` formats it, not because
-      # any exists yet. When the module tests land they bring a `make test`
-      # target, and its hook belongs in that same diff — the rule this file
-      # already applies to `zizmor`. A test suite whose local gate arrives a
-      # commit later is a suite that was ungated for a commit.
-
 
       # The lock files are a trigger too. `validate` runs `init` first, and
       # `init` resolves providers through .terraform.lock.hcl, so a commit that

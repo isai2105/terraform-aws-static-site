@@ -271,12 +271,17 @@ fmt-check: check-terraform ## Fail if any Terraform file is not canonically form
 # recorded in each .terraform.lock.hcl is not a question this target should be
 # the first to ask.
 #
-# What the deletion costs instead: after `make validate`, a bare `terraform
-# plan` typed in envs/stage stops with "Backend initialization required" until
-# something initialises it again. Every documented path in this repository
-# already does — the plan, apply and destroy targets init on every run — so the
-# cost falls only on somebody bypassing this file, and it arrives as an error
-# telling them exactly what to do.
+# What the deletion costs instead: after `make validate`, a terraform command
+# run directly in envs/stage or envs/prod stops with "Backend initialization
+# required" until something initialises the workspace again. The plan, apply
+# and destroy targets here init on every run and are unaffected. The direct
+# invocations are not, and the first version of this comment claimed they were
+# — four snippets across docs/TEARDOWN.md and docs/BOOTSTRAP.md drove terraform
+# straight at an environment root with no init line, and every one of them
+# broke. They now carry the init line themselves, which is the fix and also the
+# standing rule: a runbook snippet aimed at an environment root inits first, or
+# it is a snippet that works only on the day it was written. bootstrap/ takes a
+# local backend and records nothing, so nothing there is affected either way.
 #
 # One class of directory is skipped, and it is skipped because Terraform cannot
 # do what this target asks of it rather than because checking would be

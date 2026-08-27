@@ -312,8 +312,14 @@ destroy** — a destroy is an apply of a destroy plan — so it tells you a run 
 not which direction it was going. Then, from the environment root:
 
 ```bash
+terraform -chdir=envs/<env> init -input=false -backend-config=backend.hcl
 terraform -chdir=envs/<env> force-unlock <lock-id>
 ```
+
+The `init` is not optional and not first-time-only. `force-unlock` reaches the lock through the
+backend, and `make validate` removes the backend record from these roots on every run — which
+is what keeps the checks runnable without AWS credentials — so an environment root is routinely
+uninitialised when you arrive here.
 
 `docs/TEARDOWN.md` section 5 walks this end to end against a real killed destroy, including why
 the state file cannot be trusted to say what that run removed.
