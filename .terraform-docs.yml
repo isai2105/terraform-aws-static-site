@@ -52,12 +52,15 @@ settings:
   hide-empty: true
 
   # Report the provider *constraints* the module declares, never the versions a
-  # lock file happens to record. A child module does not own a lock file, but
-  # anyone who runs `terraform init` inside one leaves a `.terraform.lock.hcl`
-  # behind — and with lockfile reading on, that file would silently change the
-  # generated table and fail the check for a reason having nothing to do with
-  # the commit. The constraint is also the honest answer: it is what the module
-  # promises a caller, and the resolved version belongs to the root.
+  # lock file happens to record. That started as a guard against a stray
+  # `.terraform.lock.hcl` left behind by anyone running `terraform init` inside
+  # a module, and it is now load-bearing: modules/static-site carries a
+  # committed lock file, because `terraform test` initialises the module as a
+  # root and resolves providers through one. With lockfile reading on, a lock
+  # refresh would rewrite that module's generated table and fail this check on a
+  # commit that changed no interface at all. The constraint is also the honest
+  # answer: it is what the module promises a caller, and a resolved version
+  # belongs to whichever root did the resolving.
   lockfile: false
 
 output:
