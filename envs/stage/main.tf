@@ -67,3 +67,6 @@ module "site" {
   # the arguments here; the module's README carries the two modes and which to
   # pick.
 }
+
+# Touched to exercise the plan workflow on a pull request that changes an
+# environment. This branch is never merged.
