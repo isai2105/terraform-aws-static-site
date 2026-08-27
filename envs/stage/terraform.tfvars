@@ -23,7 +23,7 @@
 # A cloner edits these five and nothing else in this directory.
 
 aws_region  = "us-east-2"
-name_prefix = "isai2105"
+name_prefix = "Isai_2105"
 
 project           = "terraform-aws-static-site"
 github_owner      = "isai2105"
