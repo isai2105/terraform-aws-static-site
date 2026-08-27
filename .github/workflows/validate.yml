@@ -1,10 +1,11 @@
 # Validation that runs on every pull request.
 #
-# Five jobs, none of which needs an AWS account, a role or a state bucket: the
+# Six jobs, none of which needs an AWS account, a role or a state bucket: the
 # Terraform job runs `init -backend=false`, TFLint runs with the AWS ruleset's
-# deep-check rules off, Trivy reads the HCL statically, and the other two never
-# touch a cloud provider at all. That is what lets this gate land before the
-# code it gates, and what keeps it fast enough to be a required check.
+# deep-check rules off, Trivy and terraform-docs read the HCL statically, and
+# the other two never touch a cloud provider at all. That is what lets this gate
+# land before the code it gates, and what keeps it fast enough to be a required
+# check.
 #
 # Every third-party action is pinned by commit SHA — a tag can be moved, a
 # commit cannot.
@@ -129,6 +130,73 @@ jobs:
       # scan makes no network call, so there is no rate limit to lift.
       - name: Scan
         run: make scan
+
+  # The generated half of each module's README — the requirements, providers,
+  # resources, inputs and outputs tables — checked against the `.tf` files it
+  # claims to describe. terraform-docs parses HCL and renders markdown, so like
+  # everything above it this reaches no AWS API and needs no credentials.
+  #
+  # This is a check and not a fix: `make docs-check` fails on drift rather than
+  # regenerating and pushing. A job that committed its own correction would
+  # report green on work nobody reviewed, and would push to a pull request
+  # branch — which is why `permissions: contents: read` at the top of this file
+  # stays as it is.
+  #
+  # It is required rather than advisory because the failure it catches is
+  # invisible. Stale generated documentation does not break a plan or an apply;
+  # it sits beside the module looking authoritative while describing an
+  # interface that has moved, and the next three commits that touch this
+  # module's inputs and outputs are exactly where that happens. A local hook
+  # cannot cover it either: the first commit pushed from a clone without the
+  # hook installed is the one that lands the drift.
+  terraform-docs:
+    name: terraform-docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the pinned terraform-docs version
+        id: terraform-docs-version
+        # As with TFLint and Trivy: the Makefile is the pin. The stakes are a
+        # little higher here, because this check compares generated text byte
+        # for byte — two versions of terraform-docs that disagree about a table
+        # would fail every pull request until someone regenerated, on a diff
+        # that explains none of it.
+        run: echo "version=$(make -s print-terraform-docs-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install terraform-docs
+        env:
+          VERSION: ${{ steps.terraform-docs-version.outputs.version }}
+        # No action for this one. terraform-docs/gh-actions is a generator
+        # rather than an installer: it takes the invocation's flags as `with:`
+        # inputs and can commit the result, which is a second copy of what
+        # `make docs-check` already owns and a push this workflow must not make.
+        # So the release archive is fetched directly and the Makefile target is
+        # called, which is the same shape the Trivy job settled on.
+        #
+        # The archive is verified against the checksum file published beside it.
+        # That detects a truncated or corrupted download rather than a
+        # compromised release — the release tag is what fixes the contents, as
+        # it does for the tflint and trivy binaries above.
+        run: |
+          workdir="$(mktemp -d)"
+          base="https://github.com/terraform-docs/terraform-docs/releases/download/v${VERSION}"
+          archive="terraform-docs-v${VERSION}-linux-amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "${workdir}/${archive}" "${base}/${archive}"
+          curl --fail --silent --show-error --location \
+            --output "${workdir}/checksums" "${base}/terraform-docs-v${VERSION}.sha256sum"
+          (cd "${workdir}" && sha256sum --ignore-missing --check checksums)
+          # The archive also carries a LICENSE and a README; only the binary is
+          # extracted, and its directory goes on PATH rather than into a system
+          # one, so no step here needs to be root.
+          tar -xzf "${workdir}/${archive}" -C "${workdir}" terraform-docs
+          echo "${workdir}" >> "$GITHUB_PATH"
+
+      - name: Check the generated module documentation
+        run: make docs-check
 
   # Workflow syntax, expression errors and — through shellcheck — bugs in the
   # `run:` blocks above. This is what keeps the hardening of these workflows

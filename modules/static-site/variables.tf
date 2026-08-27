@@ -15,9 +15,9 @@
 variable "name_prefix" {
   description = <<-EOT
     Prefix for the globally unique site bucket name, which is composed as
-    "<name_prefix>-site-<environment>-<8 hex characters>". This must be the same
+    `<name_prefix>-site-<environment>-<8 hex characters>`. This must be the same
     value the bootstrap root was applied with: the CI apply role's S3 grant is
-    scoped to "<name_prefix>-site-*", so a bucket named outside that pattern
+    scoped to `<name_prefix>-site-*`, so a bucket named outside that pattern
     cannot be created by CI.
   EOT
   type        = string
@@ -133,14 +133,14 @@ variable "domain_name" {
   description = <<-EOT
     Fully qualified domain name to serve the site from, for example
     "app.example.com". Leave null — the default — to serve from the
-    distribution's own *.cloudfront.net hostname on the default CloudFront
+    distribution's own `*.cloudfront.net` hostname on the default CloudFront
     certificate, which requires no domain and works in any account.
 
     When set, exactly one of hosted_zone_id or acm_certificate_arn must be set
     too: the first has this module request and validate a certificate through
     Route 53, the second attaches a certificate the caller has already issued.
 
-    One exact name, never a wildcard. "*.example.com" is rejected deliberately:
+    One exact name, never a wildcard. `*.example.com` is rejected deliberately:
     a wildcard certificate covers the subdomains and not the apex, so making it
     useful means adding example.com as a subject alternative name — and this
     module has no SANs by design, which is what lets the validation record be
