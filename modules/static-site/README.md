@@ -73,9 +73,9 @@ and will use this same alias when it arrives.
 
 ## Both providers must carry `default_tags`
 
-The module tags nothing itself. Every resource it creates is tagged through the
-caller's `default_tags`, and it requires two keys of both provider
-configurations it is given:
+The module tags nothing itself. Every resource it creates *that can be tagged*
+is tagged through the caller's `default_tags`, and it requires two keys of both
+provider configurations it is given:
 
 - **`Project`**, present and non-empty;
 - **`Env`**, equal to the `environment` input.
@@ -87,6 +87,33 @@ API for everything carrying these two tags and asserting the answer is empty, so
 an untagged orphan is indistinguishable from no orphan at all. `Env` is compared
 rather than merely required because an environment root copied from another one
 keeps the tag it was copied with, which is how prod ends up tagged `stage`.
+
+### Three resources cannot be tagged, and the teardown check cannot see them
+
+`aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy` and
+`aws_cloudfront_origin_access_control` expose no `tags` and no `tags_all` — the
+CloudFront API has nowhere to put them. The resource groups tagging API returns
+only taggable resources, so **a leak of any of these leaves the teardown
+assertion green**. That is not fixable by tagging; it is a property of the API.
+
+It matters most where the quota is tightest. This module creates four
+untaggable, quota-bearing resources per environment against an account-wide cap
+of **20 each** for custom cache policies (`L-7D134442`) and custom response
+headers policies. The OAC quota is 100, so it is the same blindness with an
+order of magnitude more headroom.
+
+Two detectors are available, and a teardown runbook or end-to-end workflow that
+relies on tags alone has neither:
+
+- a sweep of `aws cloudfront list-cache-policies` and
+  `list-response-headers-policies`, filtered by the `<name_prefix>-site-` name
+  prefix;
+- a manual post-destroy checklist item.
+
+The policy names are deliberately stable — they carry `environment` but not the
+bucket's random suffix — so that a leaked policy collides loudly on the next
+apply of the same environment. With no tag-based detector, that collision is the
+only automatic signal a previous cycle leaked.
 
 ## Naming is a contract, not a convention
 
@@ -106,17 +133,89 @@ The random suffix is minted on every apply, and this repository destroys every
 environment within the hour — so **the bucket name is different every cycle**.
 Nothing downstream may hardcode it.
 
+## Caching is split, and so are the headers
+
+Two cache behaviours, each with its own cache policy and its own response
+headers policy. The split exists because the two halves of a built SPA have
+opposite requirements:
+
+| | `/assets/*` | everything else |
+|---|---|---|
+| Edge (cache policy) | one year | revalidate every request |
+| Browser (`Cache-Control`) | `public, max-age=31536000, immutable` | `no-cache` |
+| Why | Vite emits content-hashed filenames, so a URL's content never changes | the document must always resolve to the current build |
+
+The two columns are set by **different mechanisms**, and conflating them is the
+mistake this design exists to avoid. A cache policy decides only how long
+CloudFront holds an object; it emits no header to the viewer. The browser-facing
+`Cache-Control` comes from the response headers policy or it does not exist at
+all — without it, a returning visitor re-requests every hashed asset on every
+page load while the edge happily reports a cache hit.
+
+Both response headers policies carry the same security headers — HSTS,
+`X-Content-Type-Options` and the Content-Security-Policy — from a single `local`,
+attached by construction rather than by anyone keeping two blocks in step. That
+matters outside this module: the app repository asserts the CSP against one
+request to `/` and treats the answer as describing the whole distribution.
+
+`X-Frame-Options` is deliberately absent. The CSP carries `frame-ancestors
+'none'`, and CSP Level 2 onward requires a browser that understands it to ignore
+`X-Frame-Options` entirely.
+
+## The Content-Security-Policy is a cross-repository contract
+
+`local.csp` is published as the `content_security_policy` output so that a test
+can assert the live header against the value the policies were built from,
+rather than against a second copy of the string. The end-to-end workflow reads
+it that way; the environment roots re-export it.
+
+Editing it is a **contract change, not a local one**. The app repository holds
+its own copy and refuses to deploy until the header CloudFront serves matches
+it, so until the same change lands there, its next deploy is refused. No
+ordering avoids that window — and the window is the point.
+
+Two limits bound what may ever go in it: CloudFront caps the header value at
+1,783 characters (quota `L-E9944CCE`), which permanently forecloses a hash-based
+policy; and policies **intersect, never override** (CSP3 §8.1), so an
+application can only tighten this, never relax it. A `<meta http-equiv>` tag is
+not an escape hatch, and one silently ignores `frame-ancestors` anyway.
+
+## SPA routing is knowingly incomplete
+
+Deep links work: 403 and 404 from the origin are mapped to `/index.html` with a
+`200`, so a client-side route resolves in the browser. Both codes are mapped
+because an OAC bucket answers a missing key with 403, not 404 — the bucket policy
+grants `s3:GetObject` without `s3:ListBucket`.
+
+**This also swallows missing assets.** `CustomErrorResponses` is defined once per
+distribution and cannot be scoped to one behaviour, so a request for a missing
+hashed chunk returns `200` carrying HTML where the browser expects JavaScript.
+The browser throws a parse error, monitoring sees a healthy `200`, and the
+failure is close to undiagnosable — which is exactly what a partial deploy
+produces.
+
+It is left this way deliberately. No plan-time test can observe it; only a live
+request for a missing key can, and the end-to-end workflow is the first thing in
+this repository that makes one. The commit after that demonstration replaces
+both mappings with a viewer-request function, which is the only mechanism that
+can tell a route from an asset before the origin is consulted.
+
+## A placeholder is seeded by default
+
+`seed_placeholder` (default `true`) writes a minimal `index.html` so the site is
+servable the moment it is applied. Without it the failure is not a blank page:
+`/` resolves to a key that does not exist, the origin returns 403, and the error
+response cannot fetch its own error page either — so CloudFront hands the viewer
+the original error, and every smoke-test assertion fails against infrastructure
+that is in fact correct.
+
+Its content and etag are ignored after creation, so an application deploy is
+never reverted by the next `terraform apply`.
+
 ## What this module does not do yet
 
 Deliberately, in the order the repository adds them:
 
-- **SPA routing, split caching and security headers.** The distribution
-  currently uses the AWS-managed `CachingOptimized` cache policy and declares no
-  custom error responses, so a deep link into a client-side route returns the
-  origin's 403 rather than `index.html`. The commit that adds SPA routing
-  replaces the managed policy with a `/assets/*` and default pair, adds the two
-  response headers policies that carry `Cache-Control` and the CSP, and seeds a
-  placeholder `index.html`.
 - **A custom domain.** There is no `domain_name` input yet, so the distribution
   serves from its own `*.cloudfront.net` hostname on the default CloudFront
   certificate. This is also why `minimum_protocol_version` is not set: AWS

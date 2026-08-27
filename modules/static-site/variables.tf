@@ -93,6 +93,26 @@ variable "force_destroy" {
   default = false
 }
 
+variable "seed_placeholder" {
+  description = <<-EOT
+    Whether to seed the bucket with a placeholder `index.html` so the site is
+    servable before any application build is deployed to it. Defaults to true.
+
+    Set it to false only where something else is guaranteed to have written that
+    key first. An empty bucket behind these custom error responses does not
+    serve an empty page — it serves the origin's 403, because the error response
+    cannot fetch the error page it is pointed at either.
+  EOT
+  type        = bool
+
+  # A default is legitimate here for the same reason as `log_retention_days` and
+  # unlike the values above: it is not an environment-specific choice. "Should a
+  # freshly applied environment be servable?" has the same answer everywhere,
+  # and the answer is yes. The object is created once and its contents are
+  # ignored from then on, so seeding costs a deployed site nothing.
+  default = true
+}
+
 variable "log_retention_days" {
   description = "How long CloudFront access logs are retained in CloudWatch Logs. Applies to the log group this module creates; the log group is destroyed with the environment, so this bounds a window that in practice closes far sooner."
   type        = number

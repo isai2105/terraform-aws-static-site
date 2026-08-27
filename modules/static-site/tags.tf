@@ -1,9 +1,18 @@
 # The module's tagging contract, and the guard that makes breaking it loud.
 #
-# Every resource this module creates is tagged through the caller's provider
-# `default_tags` rather than through an input. That is the mechanism the
-# environment roots use, and keeping it the only one means there is never a
-# second place tags can come from and disagree.
+# Every resource this module creates that *can* be tagged is tagged through the
+# caller's provider `default_tags` rather than through an input. That is the
+# mechanism the environment roots use, and keeping it the only one means there
+# is never a second place tags can come from and disagree.
+#
+# The qualification is not pedantic and it bounds everything below. Three of the
+# resource types here accept no tags at all — the two CloudFront policy types in
+# policies.tf and the origin access control in cloudfront.tf, none of which
+# expose `tags` or `tags_all` in the provider schema, because the CloudFront API
+# has nowhere to put them. The precondition in this file therefore guarantees
+# that everything *taggable* is tagged, which is a narrower claim than it looks
+# and is the strongest one available. policies.tf carries what that costs the
+# teardown assertion and which detectors are left.
 #
 # It has one failure mode, and it is silent. `default_tags` is a block inside a
 # single `provider` configuration; an aliased provider is a separate

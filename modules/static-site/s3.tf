@@ -229,3 +229,72 @@ resource "aws_s3_bucket_policy" "site" {
   # it without `block_public_policy` set.
   depends_on = [aws_s3_bucket_public_access_block.site]
 }
+
+# The placeholder document, which is what makes this module independently
+# servable.
+#
+# Without it an environment applies to a distribution in front of an empty
+# bucket, and the failure is worse than an empty page. A request for `/`
+# resolves to `index.html`, the bucket has no such key, and the origin answers
+# 403 — so the custom error responses in cloudfront.tf try to fetch their own
+# error page, which is that same missing `/index.html`. CloudFront gives up and
+# hands the viewer the original error. Every smoke-test assertion in the
+# end-to-end workflow would then fail against infrastructure that is in fact
+# correct, and the first instinct on reading that failure is to go looking for
+# the bug in the distribution.
+#
+# It is a placeholder, not a fallback. The app repository's deploy overwrites
+# this key with the real build, and nothing here should ever put it back.
+resource "aws_s3_object" "placeholder_index" {
+  count = var.seed_placeholder ? 1 : 0
+
+  bucket = aws_s3_bucket.site.id
+  key    = "index.html"
+
+  # Deliberately free of inline <style> and <script>, because this document is
+  # served under the module's own Content-Security-Policy — `default-src 'none'`
+  # with no 'unsafe-inline'. A placeholder that violated the policy it is
+  # served under would be a confusing first thing to see in a browser console,
+  # and would make the policy look broken when it is working exactly as
+  # written.
+  content      = <<-EOT
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noindex">
+        <title>${var.environment} — awaiting deployment</title>
+      </head>
+      <body>
+        <h1>Infrastructure is up.</h1>
+        <p>
+          This is the placeholder document seeded by the static-site Terraform
+          module. It means the bucket, the distribution and the origin access
+          control are working, and that no application build has been deployed
+          here yet.
+        </p>
+      </body>
+    </html>
+  EOT
+  content_type = "text/html"
+
+  # No `cache_control` here on purpose. The default cache behaviour already
+  # revalidates on every request through its own zero default TTL, and the
+  # browser-facing header is set by the response headers policy with
+  # `override = true`, so an origin header would be redundant in both
+  # directions. It would also be read back as drift the moment the app
+  # repository overwrote this key without setting one.
+
+  lifecycle {
+    # The whole reason this resource is safe to declare.
+    #
+    # The app repository deploys by writing this exact key. Without these, the
+    # next `terraform apply` would see the real build in place of the content
+    # above, call it drift, and silently revert the deployed site to a
+    # placeholder — an infrastructure run undoing an application release. With
+    # them, Terraform creates the object once and never looks at its contents
+    # again.
+    ignore_changes = [content, etag]
+  }
+}
