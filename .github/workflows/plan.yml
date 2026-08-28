@@ -70,9 +70,15 @@ jobs:
   # conventional shape and it hides exactly one bug: a third environment added
   # under envs/ without a matching filter is silently never planned, and the
   # gate below reports green having asserted nothing about it. Deriving the
-  # list from the directory names means adding an environment is adding a
-  # directory, which is also what keeps the matrix values, the state key and
-  # the future GitHub Environment spelling the same three strings.
+  # list from the directory names removes that filter entirely, and it is also
+  # what keeps the matrix values, the state key and the future GitHub
+  # Environment spelling the same three strings.
+  #
+  # Adding an environment is still more than adding a directory: the plan
+  # role's state grants are scoped to `bootstrap/variables.tf`'s `environments`
+  # list, so a new one also needs the bootstrap re-applied. That half announces
+  # itself — `init` stops with an AccessDenied naming the state key — which is
+  # exactly what a forgotten path filter would not do.
   detect:
     name: detect
     runs-on: ubuntu-latest
@@ -139,8 +145,17 @@ jobs:
           # selecting every environment would read as thorough and would mean
           # every Dependabot bump of an action SHA needs to assume an AWS role
           # to go green — which a Dependabot pull request, running with a
-          # read-only token, cannot do. The gate below is what stays honest for
-          # those, by being credential-free rather than by being skipped.
+          # read-only token whatever the `permissions:` block says, cannot do.
+          # The gate below is what stays honest for those, by being
+          # credential-free rather than by being skipped.
+          #
+          # That is an argument about `.github/`, not an exemption for bots. A
+          # pull request that changes modules/ — a provider constraint bumped
+          # by Dependabot's terraform ecosystem, say — is planned like any
+          # other, and if it was opened by an account that cannot mint an OIDC
+          # token it goes red rather than merging unplanned. Re-pushing it to a
+          # branch in this repository is the move, as it is for a fork below. A
+          # provider bump is the last change that should land without a plan.
           shared=false
           while IFS= read -r file; do
             case "$file" in
@@ -245,7 +260,20 @@ jobs:
         # defaults to `latest`, so .terraform-version is read here and passed
         # in explicitly. It matters more on this side of the line — the version
         # that plans an environment is the version that will apply it.
-        run: echo "version=$(cat .terraform-version)" >> "$GITHUB_OUTPUT"
+        #
+        # Which is why the value is checked rather than interpolated straight
+        # into the output. An empty one is not an error setup-terraform
+        # reports: it falls back toward `latest`, and the plan below would run
+        # against real state on a version this repository never pinned, in
+        # silence.
+        run: |
+          version="$(cat .terraform-version)"
+          if [ -z "$version" ]; then
+            echo "::error::.terraform-version is empty; the plan would run on" \
+              "an unpinned Terraform"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Install Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -453,9 +481,10 @@ jobs:
   #
   # It also keeps the required set credential-free. It touches no AWS and needs
   # no token, so it reports on pull requests that cannot assume a role at all —
-  # every Dependabot pull request, which runs with a read-only token and no
-  # access to repository secrets. A required check that needs credentials is a
-  # required check bot-authored pull requests can never satisfy.
+  # a Dependabot bump of an action SHA, which changes no environment, goes
+  # green here with no credential in sight. A required check that needs
+  # credentials is a required check bot-authored pull requests can never
+  # satisfy.
   #
   # The verdict is computed in the script rather than expressed as an `if:`,
   # for a reason worth stating: a job whose `if:` is false is *skipped*, and a
@@ -497,6 +526,18 @@ jobs:
               echo "every changed environment planned"
               ;;
             skipped)
+              # `skipped` is a pass only when there was genuinely nothing to
+              # plan, and that is checked rather than assumed. It is equally
+              # what a plan job skipped for some *other* reason reports — one
+              # more clause on its `if:`, an actor or draft filter, a `paths:`
+              # guard — and read as a pass, this arm would hand a green light
+              # to a pull request that changed an environment and never planned
+              # it. That is the failure this whole job exists to prevent.
+              if [ "$ENVIRONMENTS" != "[]" ]; then
+                echo "::error::no plan ran for ${ENVIRONMENTS}, which is not" \
+                  "the same as there being nothing to plan"
+                exit 1
+              fi
               echo "no environment changed; there was nothing to plan"
               ;;
             *)
