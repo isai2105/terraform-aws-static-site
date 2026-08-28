@@ -7,11 +7,22 @@
 # it, and cannot be copied out of the repository settings because it was never
 # stored there.
 #
-# Two roles rather than one, because the two things CI does have different
-# blast radii and different triggers. `plan` runs on every pull request, from
-# any branch, and reads. `apply` runs only from a job that has named a GitHub
-# Environment, and writes. Collapsing them would mean every pull request in the
+# The identities are split twice, because what CI does differs in blast radius,
+# in trigger, and in which state file it writes.
+#
+# First by what they do. `plan` runs on every pull request, from any branch,
+# and reads. `apply` runs only from a job that has named a GitHub Environment,
+# and writes. Collapsing those two would mean every pull request in the
 # repository carried the credential that can destroy production.
+#
+# Then by environment: one `apply` role per name in `var.environments`, each
+# trusting exactly one `environment:` subject and able to read and write exactly
+# one environment's state. Collapsing *those* is what this file did until the
+# apply section below was split, and it meant a job declaring
+# `environment: stage` held a credential with write access to
+# `prod/terraform.tfstate` — with nothing but the `key=` string in one workflow
+# file keeping the two apart. The section header down there is careful about
+# how much that split buys, because it is less than it sounds like.
 
 data "aws_caller_identity" "current" {}
 
@@ -80,27 +91,40 @@ locals {
   # same time as an environment restriction, because the ref is simply not in
   # the subject any more. It lives in each GitHub Environment's deployment
   # branch policy instead.
-  apply_role_subjects = [
+  #
+  # Keyed by environment rather than collected into a flat list, because there
+  # is one apply role per environment and each trusts exactly one of these. A
+  # role trusting the whole set is a role that any member of the set can be, in
+  # full.
+  apply_role_subjects = {
     for environment in var.environments :
-    "${local.github_subject_prefix}:environment:${environment}"
-  ]
+    environment => "${local.github_subject_prefix}:environment:${environment}"
+  }
 
   # The layout of the state bucket, in one place. The consuming roots are
   # pointed at `<env>/terraform.tfstate` by the init command outputs.tf emits,
   # and the two must agree or the policies below grant access to keys nothing
   # writes.
-  state_object_arns = [
+  #
+  # Keyed by environment for the same reason the subjects above are: the plan
+  # role is granted across all of them and each apply role across exactly one,
+  # so one definition is read two ways — `values()` where the grant is
+  # repository-wide, `[each.key]` where it is not.
+  state_object_arns = {
     for environment in var.environments :
-    "${aws_s3_bucket.state.arn}/${environment}/terraform.tfstate"
-  ]
+    environment => "${aws_s3_bucket.state.arn}/${environment}/terraform.tfstate"
+  }
 
   # Native S3 locking writes `<key>.tflock` beside the state object and deletes
   # it when the run finishes. These are siblings of the ARNs above, not children
-  # of them, which is the property the deny statement further down depends on.
-  state_lock_arns = [
+  # of them — a property two statements below depend on: the deny in
+  # `plan_state`, which must not reach the lock, and the per-environment grants
+  # in `apply_state`, which have to name both keys rather than one key and a
+  # trailing wildcard.
+  state_lock_arns = {
     for environment in var.environments :
-    "${aws_s3_bucket.state.arn}/${environment}/terraform.tfstate.tflock"
-  ]
+    environment => "${aws_s3_bucket.state.arn}/${environment}/terraform.tfstate.tflock"
+  }
 
   # The namespace the site buckets live in.
   #
@@ -109,7 +133,7 @@ locals {
   # that remembered the last one was destroyed. So the grant has to be a
   # pattern, and a pattern is only least privilege if it excludes the things it
   # should not cover. `<prefix>-*` would also match the state bucket
-  # `<prefix>-tfstate-<hex>`, handing the apply role bucket-level control over
+  # `<prefix>-tfstate-<hex>`, handing every apply role bucket-level control over
   # the one bucket the whole design depends on surviving.
   #
   # Naming site buckets under their own infix is what keeps the two namespaces
@@ -371,7 +395,7 @@ data "aws_iam_policy_document" "plan_read" {
     resources = concat(
       local.site_bucket_arns,
       [aws_s3_bucket.state.arn],
-      local.state_object_arns,
+      values(local.state_object_arns),
     )
   }
 
@@ -408,7 +432,7 @@ data "aws_iam_policy_document" "plan_state" {
     sid       = "ReadState"
     effect    = "Allow"
     actions   = ["s3:GetObject"]
-    resources = local.state_object_arns
+    resources = values(local.state_object_arns)
   }
 
   statement {
@@ -421,7 +445,7 @@ data "aws_iam_policy_document" "plan_state" {
       "s3:DeleteObject",
     ]
 
-    resources = local.state_lock_arns
+    resources = values(local.state_lock_arns)
   }
 
   # "Plan needs state write" is broader than it sounds, and this is the statement
@@ -458,7 +482,7 @@ data "aws_iam_policy_document" "plan_state" {
       "s3:DeleteObjectVersion",
     ]
 
-    resources = local.state_object_arns
+    resources = values(local.state_object_arns)
   }
 }
 
@@ -475,19 +499,66 @@ resource "aws_iam_role_policy" "plan_state" {
 }
 
 # ---------------------------------------------------------------------------
-# The apply role — writes, assumed only from a job that named an Environment
+# The apply roles — one per environment, writes, each assumed only from a job
+# that named that Environment
 # ---------------------------------------------------------------------------
 
+# What splitting this role per environment buys, and — the part worth more —
+# what it does not.
+#
+# It isolates **state**, and only state. Each role below can read and write one
+# environment's `terraform.tfstate` and the `.tflock` beside it, and no other.
+# The other two policies are attached to every one of these roles unchanged, and
+# each carries cross-environment reach that the split leaves exactly where it
+# was:
+#
+#   - `apply_infrastructure` still holds `cloudfront:DeleteDistribution`, so the
+#     stage role, handed prod's distribution id, will delete prod's
+#     distribution. CloudFront accepts no resource-level condition on those
+#     calls at all — that policy says so at length, and no arrangement of roles
+#     here changes it.
+#   - `apply_identity` still grants `iam:CreateRole`, `iam:PutRolePolicy` and
+#     `iam:UpdateAssumeRolePolicy` on `role/react-cloudfront-app-deploy-*`,
+#     which is one pattern spanning every environment rather than one grant per
+#     role. So the stage role can rewrite prod's app deploy role — its trust
+#     policy and its inline policy both. The escalation exit stays closed,
+#     because `DenyRoleChaining` refuses `sts:AssumeRole` on `*`, but the reach
+#     is real and it predates this split rather than being introduced by it.
+#
+# A deliberate raw-API call against a known identifier is therefore exactly as
+# possible as it was before this split, through either of those two policies.
+#
+# What the split closes is the *accident* class: a mistyped `key=`, a matrix
+# that expands to the wrong name, a scheduled workflow that drifts onto the
+# wrong environment. Terraform reaches an environment's resources by first
+# reading that environment's state, and the stage role can no longer read
+# prod's — so the mistake now stops at `init` with an AccessDenied naming the
+# key it was refused, rather than proceeding against the wrong environment with
+# the right credential. That is a narrower claim than "stage cannot touch prod",
+# and it is written out because the wider one is the one a reader will otherwise
+# assume, and would then rely on.
+#
+# Timing is the stronger argument for doing it, more than the threat model. In a
+# single-maintainer repository the person who could mistype that key can also
+# approve their own prod deployment, so against intent the split buys little. It
+# earns its keep against `e2e.yml`: unattended, on a schedule, holding this
+# credential against stage. Automation nobody is watching should not also carry
+# prod's write credential.
+
 # Scoped by environment name, not by ref, because the environment claim replaces
-# the ref claim (see local.apply_role_subjects). One condition value per
-# environment, so the set of things this role may be assumed from is a list
-# somebody has to edit rather than a pattern that quietly grows.
+# the ref claim (see local.apply_role_subjects). Exactly one condition value per
+# role rather than one per environment on a shared role, which is the whole of
+# the change: a trust policy listing several subjects is a role that any one of
+# them can assume in full, so the credential a stage job received was
+# indistinguishable from the one a prod job received.
 #
 # This is also what makes prod's required reviewer real: the reviewer gate is a
 # property of the GitHub Environment, and a job that does not declare the
-# environment gets a subject that does not appear in this list and fails
+# environment gets a subject no role here names, and fails
 # AssumeRoleWithWebIdentity outright.
 data "aws_iam_policy_document" "apply_assume_role" {
+  for_each = toset(var.environments)
+
   statement {
     sid     = "GitHubActionsEnvironment"
     effect  = "Allow"
@@ -507,16 +578,27 @@ data "aws_iam_policy_document" "apply_assume_role" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = local.apply_role_subjects
+      values   = [local.apply_role_subjects[each.key]]
     }
   }
 }
 
+# The environment is in the role *name*, and the name is the only place on the
+# role it appears at all: these roles carry no tags of their own, and the
+# provider's default tags are constants for the whole bootstrap root — `Env`
+# there is the literal "bootstrap", deliberately, so it cannot distinguish these
+# two. The name is what every reference to this role turns out to be: the ARN
+# published to the environment-scoped GitHub variable, the identity the trust
+# policy is attached to, and the string an AccessDenied quotes back. Someone
+# reading a refusal in a run log should be able to tell which environment's
+# credential was refused without opening this file.
 resource "aws_iam_role" "apply" {
-  name        = "${var.name_prefix}-ci-apply"
-  description = "Role assumed by environment-gated CI to apply and destroy an environment."
+  for_each = toset(var.environments)
 
-  assume_role_policy = data.aws_iam_policy_document.apply_assume_role.json
+  name        = "${var.name_prefix}-ci-apply-${each.key}"
+  description = "Role assumed by environment-gated CI to apply and destroy the ${each.key} environment."
+
+  assume_role_policy = data.aws_iam_policy_document.apply_assume_role[each.key].json
 
   # Longer than plan's, because credentials that expire mid-destroy leave the
   # distribution half-removed and the state lock held — the failure walked in
@@ -542,12 +624,22 @@ resource "aws_iam_role" "apply" {
 # What apply may do to the state backend, which is the one place it needs more
 # than plan: it writes state.
 #
+# One document per environment, and this is where the isolation described at the
+# top of this section actually lives — two object ARNs, both named in full. The
+# lock is a *sibling* of the state key rather than a child of it, so the pair
+# cannot be collapsed into `<env>/terraform.tfstate*`: that wildcard reads as
+# tidier and would also match `<env>/terraform.tfstate.backup` and anything else
+# someone later writes beside the key, which is the opposite of what naming two
+# exact objects is for.
+#
 # `s3:DeleteObject` on the state object is deliberately absent. Terraform empties
 # state on destroy by writing an empty state file, not by deleting the object,
 # and the only operation that deletes it is deleting a workspace — something
 # nothing in this repository does. If that ever changes it should fail with a
 # named AccessDenied rather than have been granted years earlier on a guess.
 data "aws_iam_policy_document" "apply_state" {
+  for_each = toset(var.environments)
+
   statement {
     sid    = "ReadAndWriteState"
     effect = "Allow"
@@ -557,7 +649,7 @@ data "aws_iam_policy_document" "apply_state" {
       "s3:PutObject",
     ]
 
-    resources = local.state_object_arns
+    resources = [local.state_object_arns[each.key]]
   }
 
   statement {
@@ -570,10 +662,62 @@ data "aws_iam_policy_document" "apply_state" {
       "s3:DeleteObject",
     ]
 
-    resources = local.state_lock_arns
+    resources = [local.state_lock_arns[each.key]]
   }
 
+  # There is no statement denying the other environments' state objects. That is
+  # recorded here as a named residual rather than as a settled decision, because
+  # the standard `plan_state` sets further up — a deny is "not load-bearing
+  # today, it is load-bearing against the future edit" — argues for one.
+  #
+  # What holds today is structural and checkable by reading this file: the only
+  # S3 grant in `apply_infrastructure` names `local.site_bucket_arns`,
+  # `apply_identity` grants no S3 at all, and `local.site_bucket_prefix` exists
+  # to keep the site namespace disjoint from the state bucket's own name. No
+  # allow attached to an apply role reaches another environment's state key.
+  #
+  # What that does not survive is a widened *pattern*, and one is easy to
+  # picture: `ManageSiteBuckets` broadened from `<prefix>-site-*` to
+  # `<prefix>-*` is a one-character-class edit on two names that already share a
+  # prefix, and it would hand every apply role `s3:*` over the state bucket at
+  # once. The exposure differs from plan's in shape rather than in severity.
+  # `plan_read`'s own grant already names every environment's state object, so
+  # the deny there defends a resource an allow is pointed at; here it would
+  # defend a resource no allow names yet — while docs/BOOTSTRAP.md says this
+  # policy is expected to be missing an action or two, which makes it the more
+  # likely of the two to be edited.
+  #
+  # Two shapes were considered, and neither is here for a different reason.
+  #
+  # A `not_resources` whitelist — deny S3 on everything except this role's two
+  # state keys, the bucket it lists, and the site ARNs — is the only form that
+  # closes the widening completely, and it is rejected on cost rather than on
+  # effect. It would become a second authoritative statement of this role's
+  # entire S3 reach, which every future S3 grant in this file would also have to
+  # be added to; omit it once and the new grant is refused by a deny no allow
+  # can override, so the obvious repair — add the allow — does not work. That
+  # inverts the failure preference argued everywhere else here, where being too
+  # narrow costs a named AccessDenied that one line fixes.
+  #
+  # A blacklist naming the other environments' state objects has neither
+  # problem, is generated from the same local as the grant above, and would
+  # catch the widening. Its costs are a `dynamic` guard so a single-environment
+  # list does not render a statement with no resources, and a policy update on
+  # every existing role whenever an environment is added. It is absent only
+  # because every deny in this file so far carves back a grant that exists, and
+  # this one would not. Add it the moment any grant on these roles reaches the
+  # state bucket by pattern rather than by the literal ARNs above — that is the
+  # trigger, and it is checkable by reading the Resource lines in this file.
+
   # The S3 backend lists the bucket during init.
+  #
+  # Bucket-wide, and deliberately not narrowed with an `s3:prefix` condition.
+  # Listing returns key names and never their contents, so it grants no part of
+  # what the two statements above withhold — and which List calls the S3 backend
+  # makes, with which prefixes, is an implementation detail of the backend. A
+  # condition guessed at here breaks `init` with an AccessDenied that names
+  # nothing a reader can act on, to hide the fact that prod keeps its state in
+  # this bucket under a key called `prod/terraform.tfstate`.
   statement {
     sid       = "ListStateBucket"
     effect    = "Allow"
@@ -1082,30 +1226,52 @@ data "aws_iam_policy_document" "apply_identity" {
   }
 }
 
-# Inline policies rather than customer-managed ones, on both roles.
+# Inline policies rather than customer-managed ones, on every role in this file.
 #
 # They have exactly the lifetime of the role they sit on, so a destroy cannot
 # strand them — which matters in a repository whose teardown checklist exists
 # because orphans are the failure mode. The constraint to know before adding to
 # them: IAM caps the *aggregate* size of a role's inline policies at 10,240
-# characters, so the limit is shared across the three below rather than applying
-# to each. Splitting a long one into two does not buy headroom; moving to a
-# managed policy (6,144 characters each, ten attachable) is the escape, at the
-# cost of the property in the first sentence.
+# characters, so the limit is shared across the three attached to each apply
+# role rather than applying to each policy. Splitting a long one into two does
+# not buy headroom; moving to a managed policy (6,144 characters each, ten
+# attachable) is the escape, at the cost of the property in the first sentence
+# — and it would cost it once per environment now rather than once.
+# One consequence for anything outside this repository that mirrors these three.
+# A local operator identity — a human-assumable role carrying the same
+# permissions, so an environment can be applied from a laptop — used to be a
+# copy of one apply role's policies. There is no single role to copy any more:
+# such an identity has to mirror one apply role per environment, or hold the
+# union of their state grants as a deliberate choice. Re-syncing it from one
+# role here would silently leave it able to read every environment's state but
+# one, and that surfaces as an AccessDenied on a state key part-way through a
+# destroy. Nothing in this repository creates such an identity, which is why
+# this is a note and not a resource.
 resource "aws_iam_role_policy" "apply_state" {
+  for_each = aws_iam_role.apply
+
   name   = "terraform-state"
-  role   = aws_iam_role.apply.id
-  policy = data.aws_iam_policy_document.apply_state.json
+  role   = each.value.id
+  policy = data.aws_iam_policy_document.apply_state[each.key].json
 }
 
+# The one policy in this section that is deliberately identical on every apply
+# role: same document, rendered once, attached N times. It is the boundary the
+# split does not move, and keeping it a single `data` source is what stops it
+# drifting into N nearly-identical infrastructure policies that a reader would
+# have to diff to compare.
 resource "aws_iam_role_policy" "apply_infrastructure" {
+  for_each = aws_iam_role.apply
+
   name   = "infrastructure"
-  role   = aws_iam_role.apply.id
+  role   = each.value.id
   policy = data.aws_iam_policy_document.apply_infrastructure.json
 }
 
 resource "aws_iam_role_policy" "apply_identity" {
+  for_each = aws_iam_role.apply
+
   name   = "identity"
-  role   = aws_iam_role.apply.id
+  role   = each.value.id
   policy = data.aws_iam_policy_document.apply_identity.json
 }

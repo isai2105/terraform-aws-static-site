@@ -110,25 +110,41 @@ variable "github_repository_id" {
 variable "environments" {
   description = <<-EOT
     Names of the environments this repository deploys. Each one becomes a state
-    key in the state bucket, a value in the apply role's trusted-subject list,
-    and a GitHub Environment of the same name. Adding an environment is an edit
-    here plus a re-apply of this root; the apply role cannot be assumed from an
-    environment that is not in this list.
+    key in the state bucket, an apply role trusting that one environment's OIDC
+    subject and scoped to that one state key, and a GitHub Environment of the
+    same name. Adding an environment is an edit here plus a re-apply of this
+    root, and then setting AWS_APPLY_ROLE_ARN on the new GitHub Environment —
+    an environment this list does not name has no apply role at all.
   EOT
   type        = list(string)
 
   validation {
     condition     = length(var.environments) > 0
-    error_message = "At least one environment is required; with an empty list the apply role would trust no subject and could never be assumed."
+    error_message = "At least one environment is required; with an empty list no apply role would be created at all."
   }
 
-  # The names appear verbatim in an OIDC subject, in an S3 key and in a GitHub
-  # Environment name. Restricting them to the intersection of what all three
-  # accept costs nothing and removes a class of mismatch that only shows up at
-  # AssumeRoleWithWebIdentity.
+  # The names appear verbatim in an OIDC subject, in an S3 key, in an IAM role
+  # name and in a GitHub Environment name. Restricting them to the intersection
+  # of what all four accept costs nothing and removes a class of mismatch that
+  # only shows up at AssumeRoleWithWebIdentity.
   validation {
     condition     = alltrue([for e in var.environments : can(regex("^[a-z][a-z0-9-]*$", e))])
     error_message = "Each environment name must be lower case letters, digits and hyphens, starting with a letter."
+  }
+
+  # The IAM role name is the limit that binds, and it is not the one name_prefix
+  # validates against. That variable is capped at 46 so the composed bucket name
+  # fits S3's 63; the apply role is "<name_prefix>-ci-apply-<env>" against IAM's
+  # 64, which a 46-character prefix leaves eight characters of. The two limits
+  # are close enough to look like the same limit and are not, so this is checked
+  # here rather than assumed to follow: catching it costs a plan, and missing it
+  # costs a ValidationError from IAM part-way through an apply, quoting a role
+  # name and neither of the two variables that composed it.
+  validation {
+    condition = alltrue([
+      for e in var.environments : length("${var.name_prefix}-ci-apply-${e}") <= 64
+    ])
+    error_message = "Each environment name must be at most ${54 - length(var.name_prefix)} characters. The apply role is named \"<name_prefix>-ci-apply-<env>\" against IAM's 64-character limit, and the current name_prefix plus \"-ci-apply-\" already consumes ${length(var.name_prefix) + 10} of it."
   }
 
   validation {

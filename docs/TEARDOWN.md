@@ -505,8 +505,10 @@ intended to. The friction is the guard: it is what stops an accidental `destroy`
 state with it. Run `git status` afterwards and confirm the working tree is clean.
 
 The bootstrap runs on local state, so `bootstrap/terraform.tfstate` is what this destroy reads.
-If it is missing, the bucket, the provider and both roles have to be adopted back in one
-`terraform import` at a time first — `docs/BOOTSTRAP.md` section 4 explains why that file is
+If it is missing, the bucket, the provider and every role have to be adopted back in one
+`terraform import` at a time first — the plan role plus one apply role per name in
+`environments`, which is three at the two environments this repository ships and grows with the
+list, not the two the older shape had. `docs/BOOTSTRAP.md` section 4 explains why that file is
 worth keeping.
 
 If you imported a pre-existing OIDC provider rather than creating one — `docs/BOOTSTRAP.md`

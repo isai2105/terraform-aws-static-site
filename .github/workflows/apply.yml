@@ -15,11 +15,11 @@
 # dispatch from a topic branch is refused before any AWS call is made. That
 # second half has to live in GitHub rather than in IAM, because naming an
 # environment *replaces* the ref component of the OIDC subject with
-# `environment:<name>` instead of adding to it — the apply role is trusted on
-# exactly those subjects and on no ref at all (bootstrap/oidc.tf records the
-# claim as it was observed). Declaring `environment:` is therefore not
-# decoration on these jobs: without it they cannot authenticate to AWS, and
-# with it the reviewer requirement is real.
+# `environment:<name>` instead of adding to it — there is one apply role per
+# environment and each is trusted on exactly one of those subjects and on no ref
+# at all (bootstrap/oidc.tf records the claim as it was observed). Declaring
+# `environment:` is therefore not decoration on these jobs: without it they
+# cannot authenticate to AWS, and with it the reviewer requirement is real.
 #
 # Two jobs rather than one, and the split is the point of the file. `plan`
 # writes a plan file and publishes it; `apply` downloads that file and applies
@@ -63,10 +63,11 @@ on:
       # GitHub creates an environment implicitly the first time a job names
       # one, with no protection rules at all, so a free-text box makes `prd` a
       # single keystroke away from an environment that looks configured because
-      # it now exists. That one stops at `AssumeRoleWithWebIdentity` — the
-      # apply role's trust names `stage` and `prod` and nothing else — so what
-      # it costs is a confusing failure and a stray environment somebody has to
-      # notice and delete, rather than an unreviewed deploy.
+      # it now exists. That one stops at `AssumeRoleWithWebIdentity` — there is
+      # one apply role per environment and no role's trust names anything but
+      # `stage` or `prod` — so what it costs is a confusing failure and a stray
+      # environment somebody has to notice and delete, rather than an unreviewed
+      # deploy.
       #
       # `Prod` is the one that is genuinely unclear. Environment names are
       # matched case-insensitively for uniqueness, but which spelling GitHub
@@ -77,11 +78,11 @@ on:
       #
       # The two options are a contract with three things outside this file: the
       # directories under envs/, the `environments` list in
-      # bootstrap/variables.tf (which scopes the apply role's trust and its
-      # state grants), and the GitHub Environments themselves. The job below
-      # asserts the first of those at run time; the rest announce themselves as
-      # an AssumeRole failure naming the subject, which is at least a failure
-      # that points at its own cause.
+      # bootstrap/variables.tf (which mints one apply role per name and scopes
+      # each one's trust and state grants to that name), and the GitHub
+      # Environments themselves. The job below asserts the first of those at run
+      # time; the rest announce themselves as an AssumeRole failure naming the
+      # subject, which is at least a failure that points at its own cause.
       environment:
         description: Which environment to act on
         type: choice
@@ -104,8 +105,8 @@ on:
 
 # Nothing by default, granted back per job below. Both jobs take the same two —
 # `contents: read` to check out, `id-token: write` to mint the OIDC token the
-# apply role is assumed with — and neither is granted write on anything in the
-# repository, in the workflow that has the most to write to.
+# environment's apply role is assumed with — and neither is granted write on
+# anything in the repository, in the workflow that has the most to write to.
 #
 # One absence is worth naming, because it is the grant a reader goes looking
 # for: moving the plan artefact from the first job to the second needs no
@@ -159,8 +160,8 @@ jobs:
   # apply.
   #
   # This job names the environment too, and has to: the only credential that
-  # can reach prod state from here is the apply role, and the apply role is
-  # trusted on the `environment:` subject alone. So on prod this waits for the
+  # can reach prod state from here is prod's own apply role, and it is trusted
+  # on the `environment: prod` subject alone. So on prod this waits for the
   # reviewer before it runs at all — the first of the two approvals the header
   # accounts for. That is not really a cost either: a plan refreshes, which
   # means it takes the state lock and talks to the account, so approving it is
@@ -176,7 +177,7 @@ jobs:
     environment: ${{ inputs.environment }}
     permissions:
       contents: read
-      # The OIDC token exchanged for the apply role.
+      # The OIDC token exchanged for this environment's apply role.
       id-token: write
     outputs:
       # When the plan artefact became downloadable, which is what the freshness
@@ -188,12 +189,22 @@ jobs:
       # A fresh clone with no bootstrap behind it has none of these set, and
       # every one of them fails somewhere unhelpful: an empty role ARN reads as
       # "Credentials could not be loaded", an empty bucket as an S3 error about
-      # a name that is not in the file. Section 6 of the runbook sets all four.
+      # a name that is not in the file. The runbook sets them in two places:
+      # the first two on the repository in section 6, AWS_APPLY_ROLE_ARN on
+      # each GitHub Environment at the end of section 7.4.
+      #
+      # That split is not bookkeeping. There is one apply role per environment,
+      # and `vars` resolves an environment-scoped value ahead of a
+      # repository-scoped one for a job that declares an environment — which is
+      # what lets the single expression below mean stage's role on a stage
+      # dispatch and prod's on a prod one, with no branch in this file. The
+      # failure mode it introduces is an environment created without its
+      # variable, and that reads here as empty rather than as wrong.
       #
       # Checked here only. The apply job cannot start unless this one
       # succeeded, so a second copy of this step would assert something already
       # known and drift from this one the first time the list changes.
-      - name: Check the repository variables this workflow needs
+      - name: Check the variables this workflow needs
         env:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
           AWS_REGION: ${{ vars.AWS_REGION }}
@@ -207,10 +218,12 @@ jobs:
             fi
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::unset repository variables: ${missing[*]}. They are" \
-              "set by the four commands in the bootstrap's" \
-              "repository_variable_commands output; see section 6 of" \
-              "docs/BOOTSTRAP.md"
+            echo "::error::unset variables: ${missing[*]}. TF_STATE_BUCKET and" \
+              "AWS_REGION are repository variables; AWS_APPLY_ROLE_ARN is set on" \
+              "each GitHub Environment, so an empty one most often means it was" \
+              "set on the repository instead. All of them come from the" \
+              "bootstrap's repository_variable_commands output; see sections 6" \
+              "and 7.4 of docs/BOOTSTRAP.md"
             exit 1
           fi
 
