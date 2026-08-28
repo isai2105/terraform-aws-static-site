@@ -193,7 +193,8 @@ gh api --method POST /repos/<owner>/<repo>/rulesets --input - <<'JSON'
           { "context": "pr-title" },
           { "context": "terraform-docs" },
           { "context": "terraform-test" },
-          { "context": "plan-gate" }
+          { "context": "plan-gate" },
+          { "context": "zizmor" }
         ]
       }
     }
@@ -202,7 +203,7 @@ gh api --method POST /repos/<owner>/<repo>/rulesets --input - <<'JSON'
 JSON
 ```
 
-**Those eight are the current set, and cloners should paste all eight.** Every one of them is
+**Those nine are the current set, and cloners should paste all nine.** Every one of them is
 reported by a workflow in this repository today, so a ruleset carrying fewer is a gate that
 silently is not there — drop `plan-gate` in particular and pull requests merge with no Terraform
 plan gate at all, which is the omission that costs something rather than the one that shows up
@@ -210,12 +211,39 @@ as a missing badge.
 
 **It is not a frozen final answer either.** The list grew one context per gate through Phases 2
 to 4: the first five above are the set that exists when this runbook first runs in plan order,
-and `terraform-docs`, `terraform-test` and `plan-gate` each arrive with the step that introduces
-the check, which re-issues this call with its own context added. Anyone building the repository in
-that order adds them as they land rather than up front, and the next gate does the same. A check
-that is not added to the ruleset when it lands is a check that stays advisory until somebody
-notices. Update the ruleset in place with `--method PUT /repos/<owner>/<repo>/rulesets/<id>`
-rather than creating a second one.
+and `terraform-docs`, `terraform-test`, `plan-gate` and `zizmor` each arrive with the step that
+introduces the check, which re-issues this call with its own context added. Anyone building the
+repository in that order adds them as they land rather than up front, and the next gate does the
+same. A check that is not added to the ruleset when it lands is a check that stays advisory until
+somebody notices. Update the ruleset in place with `--method PUT
+/repos/<owner>/<repo>/rulesets/<id>` rather than creating a second one.
+
+A PUT replaces the rules it carries, so send the whole `rules` array and not only the part that
+changed — the same full-body rule section 7.4 states for the environments, and it fails the same
+silent way, at HTTP 200 with a gate that is weaker than it was. The safe form is to read the
+ruleset, add the context, and send it back:
+
+```bash
+id="$(gh api /repos/<owner>/<repo>/rulesets --jq '.[] | select(.name == "protect-main") | .id')"
+gh api "/repos/<owner>/<repo>/rulesets/$id" \
+  | jq '{name, target, enforcement, conditions, rules}
+        | (.rules[] | select(.type == "required_status_checks")
+           | .parameters.required_status_checks)
+          |= (if any(.context == "zizmor") then . else . + [{"context": "zizmor"}] end)' \
+  | gh api --method PUT "/repos/<owner>/<repo>/rulesets/$id" --input -
+
+gh api "/repos/<owner>/<repo>/rulesets/$id" \
+  --jq '[.rules[] | select(.type == "required_status_checks")
+         | .parameters.required_status_checks[].context] | sort'
+# expect the nine contexts above, each exactly once
+```
+
+The `if any(...)` is what makes that safe to run twice, and a runbook step that
+is not safe to run twice is a defect in a section whose sibling at 7.4 is
+explicitly re-runnable. A plain `+=` appends unconditionally; whether the API
+then rejects the duplicate, silently keeps it or silently folds it away has not
+been tested here, and the guard is cheaper than finding out on the ruleset that
+protects `main`. Substitute the next gate's name for `zizmor` when there is one.
 
 `strict_required_status_checks_policy` is `false` deliberately: requiring branches to be
 up to date with `main` before merging forces a rebase and a full re-run of every check on every

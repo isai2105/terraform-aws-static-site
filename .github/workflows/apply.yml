@@ -42,8 +42,13 @@
 # request is the one with something to read. Worth knowing before the second
 # prompt arrives and reads like a stuck run.
 #
-# Every third-party action is pinned by commit SHA — a tag can be moved, a
-# commit cannot.
+# The hardening rules this file follows — SHA-pinned actions checked for
+# `using: node24`, `permissions: {}` widened per job, `runs-on: ubuntu-24.04`, a
+# `timeout-minutes` on every job and `persist-credentials: false` on every
+# checkout — are stated once and in full at the top of validate.yml, together
+# with which of them the `zizmor` job there actually enforces and which are held
+# by hand. Both of the timeouts below are larger than that file's fifteen
+# minutes, and each is argued where it sits.
 
 name: apply
 
@@ -97,10 +102,18 @@ on:
           - destroy
         default: apply
 
-# Least privilege by default. Both jobs widen this for themselves by exactly
-# one permission, and nothing here writes to the repository.
-permissions:
-  contents: read
+# Nothing by default, granted back per job below. Both jobs take the same two —
+# `contents: read` to check out, `id-token: write` to mint the OIDC token the
+# apply role is assumed with — and neither is granted write on anything in the
+# repository, in the workflow that has the most to write to.
+#
+# One absence is worth naming, because it is the grant a reader goes looking
+# for: moving the plan artefact from the first job to the second needs no
+# `actions:` permission. actions/upload-artifact and actions/download-artifact
+# authenticate to the artifact service with the runner's own short-lived token
+# rather than with `GITHUB_TOKEN`, so the transport that makes this file's
+# two-job split work costs nothing here.
+permissions: {}
 
 # One group per environment, because the thing being protected is the state
 # file and there is one of those per environment. Two runs applying `stage` at
@@ -154,7 +167,11 @@ jobs:
   # approving something real even though it writes nothing.
   plan:
     name: plan (${{ inputs.action }} ${{ inputs.environment }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # Twenty rather than the fifteen the pull-request path carries, for one
+    # concrete difference: the plan below waits `-lock-timeout=10m` for the
+    # state lock where plan.yml waits five, and a cap has to sit above the wait
+    # underneath it or it fires on the run that was about to succeed.
     timeout-minutes: 20
     environment: ${{ inputs.environment }}
     permissions:
@@ -199,6 +216,8 @@ jobs:
 
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The dispatch input is a closed list, but the list is written in this
       # file and the directories it names are not. An environment renamed or
@@ -484,7 +503,7 @@ jobs:
   apply:
     name: apply (${{ inputs.action }} ${{ inputs.environment }})
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Two hours, and the number is chosen against one specific ceiling rather
     # than against how long an apply usually takes. The AWS provider waits on a
     # CloudFront distribution's deletion with a hardcoded 90-minute waiter and
@@ -554,6 +573,8 @@ jobs:
 
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Into the environment's own directory, which is where `-chdir` will
       # look for it and where the backend gets initialised below.
