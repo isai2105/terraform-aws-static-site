@@ -247,10 +247,10 @@ jobs:
       # a name that is not in the file. Section 6 of the runbook sets all three.
       #
       # All three, and none of them environment-scoped, which is the one place
-      # this file and apply.yml legitimately differ. There is one plan role for
-      # every environment — it is trusted on the `pull_request` subject, which
-      # carries no environment component at all — where there is one apply role
-      # per environment, published as an environment-scoped
+      # this file and apply.yml legitimately differ. There is exactly one plan
+      # role, shared by every environment — it is trusted on the `pull_request`
+      # subject, which carries no environment component at all — where there is
+      # one apply role per environment, published as an environment-scoped
       # AWS_APPLY_ROLE_ARN that only a job declaring `environment:` resolves.
       # This workflow declares none and needs none.
       - name: Check the repository variables this workflow needs

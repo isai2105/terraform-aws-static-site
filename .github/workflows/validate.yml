@@ -43,9 +43,9 @@
 # neither has a timeout rule.
 #
 # Writing the division out is the point rather than a footnote to it. Two more
-# workflows are authored after this commit, and one of them is `e2e.yml` — the
-# highest-privilege file in the repository, holding the apply role, destroying
-# real infrastructure, on a schedule with nobody watching. One rule of the six
+# workflows are authored after this commit, and one of them is `e2e.yml`, the
+# only file in the repository that holds an apply role — stage's — with nobody
+# watching, destroying real infrastructure on a schedule. One rule of the six
 # reaches it through a person reading this list, and the list has to say which.
 #
 # 1. Every `uses:` is a full commit SHA, with the version tag beside it as a
