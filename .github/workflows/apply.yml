@@ -32,6 +32,16 @@
 # again a minute later. Terraform enforces the rest: a saved plan whose state
 # has moved on is refused as stale rather than applied on top of the change.
 #
+# The bill for that, on prod, is two approvals rather than one, and it is
+# measured rather than assumed. A job that names an environment creates a
+# deployment against it, and both of these jobs name one: the stage destroy of
+# 2026-08-28 (run 33195420483) produced deployments 6145745999 and 6145752607,
+# one per job, each passing through its own `waiting` state — the state prod's
+# required reviewer holds a deployment in. So a prod dispatch asks for the
+# reviewer twice, once to take the plan and once to apply it, and the second
+# request is the one with something to read. Worth knowing before the second
+# prompt arrives and reads like a stuck run.
+#
 # Every third-party action is pinned by commit SHA — a tag can be moved, a
 # commit cannot.
 
@@ -138,9 +148,10 @@ jobs:
   # This job names the environment too, and has to: the only credential that
   # can reach prod state from here is the apply role, and the apply role is
   # trusted on the `environment:` subject alone. So on prod this waits for the
-  # reviewer before it runs at all. That is not really a cost either — a plan
-  # refreshes, which means it takes the state lock and talks to the account, so
-  # approving it is approving something real even though it writes nothing.
+  # reviewer before it runs at all — the first of the two approvals the header
+  # accounts for. That is not really a cost either: a plan refreshes, which
+  # means it takes the state lock and talks to the account, so approving it is
+  # approving something real even though it writes nothing.
   plan:
     name: plan (${{ inputs.action }} ${{ inputs.environment }})
     runs-on: ubuntu-latest
