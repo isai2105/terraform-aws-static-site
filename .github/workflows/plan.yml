@@ -1,0 +1,547 @@
+# `terraform plan` for every environment a pull request changes.
+#
+# This is the first workflow in the repository that touches AWS. It is a
+# separate file from validate.yml rather than seven more jobs in it, for the
+# reason it is a separate commit: everything in validate.yml runs without an
+# account, a role or a state bucket, and a missing repository variable, an
+# expired role or an S3 outage must not be able to take `fmt-check` red with
+# it. Those two failure classes are read differently and should be reported
+# separately.
+#
+# The reviewer-facing artefact of an infrastructure pull request is the plan,
+# not the diff — a three-line change to a `locals` block can replace a bucket —
+# so the plan is posted back to the pull request as a comment that is updated
+# in place rather than left in a log somebody has to go and open.
+#
+# Every third-party action is pinned by commit SHA — a tag can be moved, a
+# commit cannot.
+
+name: plan
+
+on:
+  pull_request:
+    # The default set, written out. `edited` is deliberately absent, unlike
+    # validate.yml: that workflow checks the pull request title, which an edit
+    # changes, and nothing here reads anything an edit can touch. Re-planning
+    # on every description tweak would take the state lock for no new
+    # information.
+    types: [opened, synchronize, reopened]
+
+# No `push:` trigger, and that is a constraint rather than a preference. The
+# plan role trusts exactly one subject — `repo:<owner>@<id>/<repo>@<id>:
+# pull_request` — with no ref component (bootstrap/oidc.tf records the observed
+# claim). A push-triggered run presents `…:ref:refs/heads/main` instead and
+# cannot assume the role at all, so a `push:` trigger here would be a workflow
+# that fails on `main` forever. Drift detection on `main` is a different job
+# with a different identity, and it is not this one.
+
+# Least privilege by default. The plan job widens this for itself; nothing else
+# here writes anything.
+permissions:
+  contents: read
+
+# `terraform plan` refreshes state, and refreshing takes the state lock. Two
+# pushes in quick succession would otherwise race for it, and a Terraform
+# process killed mid-flight strands the `.tflock` object, blocking every
+# subsequent run in that environment until somebody runs `force-unlock`. So
+# runs for one pull request queue rather than overlap, and in-flight runs are
+# never cancelled — cancellation is precisely what strands the lock.
+#
+# This serialises one pull request against itself. Two *different* pull
+# requests touching the same environment are handled a layer down, by the
+# `-lock-timeout` on the plan itself: the second run waits for the lock instead
+# of failing on it. Queueing costs a minute; a stranded lock costs an
+# intervention.
+concurrency:
+  group: plan-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Suppresses the "now run terraform apply" advice Terraform prints for a
+  # human at a terminal. Nothing here is at a terminal, and the advice is
+  # wrong: applies come from apply.yml, off a reviewed plan artefact.
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  # Which environments does this pull request actually change?
+  #
+  # The answer is computed rather than declared. A `dorny/paths-filter` block —
+  # one filter per environment, one matrix entry per filter — would be the
+  # conventional shape and it hides exactly one bug: a third environment added
+  # under envs/ without a matching filter is silently never planned, and the
+  # gate below reports green having asserted nothing about it. Deriving the
+  # list from the directory names removes that filter entirely, and it is also
+  # what keeps the matrix values, the state key and the future GitHub
+  # Environment spelling the same three strings.
+  #
+  # Adding an environment is still more than adding a directory: the plan
+  # role's state grants are scoped to `bootstrap/variables.tf`'s `environments`
+  # list, so a new one also needs the bootstrap re-applied. That half announces
+  # itself — `init` stops with an AccessDenied naming the state key — which is
+  # exactly what a forgotten path filter would not do.
+  detect:
+    name: detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      environments: ${{ steps.detect.outputs.environments }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and both its parents, which is all the diff below
+          # needs. A full clone would work too and costs more on every run.
+          fetch-depth: 2
+
+      - name: Work out which environments changed
+        id: detect
+        shell: bash
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          # `pull_request` checks out refs/pull/N/merge — the pull request
+          # merged into the base branch, which is the tree that will exist on
+          # `main` and therefore the right thing to plan. Its first parent is
+          # the base tip, so `HEAD^1 HEAD` is the net change this pull request
+          # introduces, with commits landed on `main` since branching excluded.
+          #
+          # That reading depends on HEAD being a merge commit. If it ever
+          # stops being one — a checkout pinned to `head.sha`, a change in the
+          # action's defaults — the diff would silently become "everything
+          # since the previous commit" and this job would plan the wrong set
+          # without saying so. Cheaper to assert it than to debug it.
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -ne 3 ]; then
+            echo "::error::HEAD is not the pull request's merge commit, so the" \
+              "base of the diff cannot be determined; the checkout step above" \
+              "must leave refs/pull/N/merge checked out"
+            exit 1
+          fi
+          # `core.quotePath=false` because the default renders a non-ASCII path
+          # as an escaped, double-quoted string, which would stop matching the
+          # directory name `find` reports below — and the direction that fails
+          # in is an environment quietly not planned.
+          changed="$(git -c core.quotePath=false diff --name-only HEAD^1 HEAD)"
+          printf 'changed files:\n%s\n\n' "$changed"
+
+          # Every directory under envs/ is an environment. This is the only
+          # place the set is enumerated.
+          mapfile -t environments < <(
+            find envs -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+          )
+          if [ "${#environments[@]}" -eq 0 ]; then
+            echo "::error::no environment directories found under envs/"
+            exit 1
+          fi
+
+          # Two things select an environment: a change under its own directory,
+          # and a change to something every environment reads. The second list
+          # is short and explicit — the shared module, and the Terraform
+          # version every root is planned with, which can change a plan on its
+          # own through a state schema upgrade.
+          #
+          # `.github/` is deliberately not in it. A change to this workflow
+          # selecting every environment would read as thorough and would mean
+          # every Dependabot bump of an action SHA needs to assume an AWS role
+          # to go green — which a Dependabot pull request, running with a
+          # read-only token whatever the `permissions:` block says, cannot do.
+          # The gate below is what stays honest for those, by being
+          # credential-free rather than by being skipped.
+          #
+          # That is an argument about `.github/`, not an exemption for bots. A
+          # pull request that changes modules/ — a provider constraint bumped
+          # by Dependabot's terraform ecosystem, say — is planned like any
+          # other, and if it was opened by an account that cannot mint an OIDC
+          # token it goes red rather than merging unplanned. Re-pushing it to a
+          # branch in this repository is the move, as it is for a fork below. A
+          # provider bump is the last change that should land without a plan.
+          shared=false
+          while IFS= read -r file; do
+            case "$file" in
+              modules/*|.terraform-version) shared=true ;;
+            esac
+          done <<< "$changed"
+
+          selected=""
+          for environment in "${environments[@]}"; do
+            matched="$shared"
+            if [ "$matched" != true ]; then
+              while IFS= read -r file; do
+                case "$file" in
+                  "envs/${environment}/"*) matched=true; break ;;
+                esac
+              done <<< "$changed"
+            fi
+            if [ "$matched" = true ]; then
+              selected+="${environment}"$'\n'
+            fi
+          done
+
+          json="$(jq -Rc --slurp 'split("\n") | map(select(length > 0))' <<< "$selected")"
+          echo "environments to plan: ${json}"
+          echo "environments=${json}" >> "$GITHUB_OUTPUT"
+
+          # A pull request from a fork gets no OIDC token on a public
+          # repository, so the plan below cannot run at all. Failing here, with
+          # a sentence, beats failing four steps later on an
+          # AssumeRoleWithWebIdentity error that names nothing — and it fails
+          # rather than skipping, because a fork's infrastructure change is the
+          # last one that should merge without a plan. The maintainer's move is
+          # to push the same commits to a branch in this repository.
+          if [ "$json" != "[]" ] && [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::this pull request changes an environment but comes" \
+              "from a fork (${HEAD_REPO}), and GitHub mints no OIDC token for" \
+              "fork pull requests, so no plan can run; re-open it from a" \
+              "branch in ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+
+  # One plan per changed environment, one check per plan, so a red mark names
+  # the environment that broke.
+  #
+  # This job does **not** declare `environment:`. Naming a GitHub Environment
+  # replaces the `sub` claim with the `environment:` form rather than adding to
+  # it, and the plan role trusts the bare `pull_request` subject only, so an
+  # `environment:` here would break every run in this workflow with an
+  # authorisation error that points at IAM rather than at the line that caused
+  # it. apply.yml is the workflow that names one, and its role is trusted
+  # accordingly (bootstrap/oidc.tf).
+  plan:
+    name: plan (${{ matrix.environment }})
+    needs: detect
+    if: needs.detect.outputs.environments != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # The OIDC token exchanged for the plan role.
+      id-token: write
+      # The sticky comment. This is the whole reason the workflow-level default
+      # is not enough, and it is granted to this job alone.
+      pull-requests: write
+    strategy:
+      # One environment failing to plan says nothing about the other, and a
+      # reviewer wants both answers in one pass.
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJSON(needs.detect.outputs.environments) }}
+    steps:
+      # A fresh clone with no bootstrap behind it has none of these set, and
+      # every one of them fails somewhere unhelpful: an empty role ARN reads as
+      # "Credentials could not be loaded", an empty bucket as an S3 error about
+      # a name that is not in the file. Section 6 of the runbook sets all four.
+      - name: Check the repository variables this workflow needs
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_PLAN_ROLE_ARN: ${{ vars.AWS_PLAN_ROLE_ARN }}
+        run: |
+          missing=()
+          for name in TF_STATE_BUCKET AWS_REGION AWS_PLAN_ROLE_ARN; do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::unset repository variables: ${missing[*]}. They are" \
+              "set by the four commands in the bootstrap's" \
+              "repository_variable_commands output; see section 6 of" \
+              "docs/BOOTSTRAP.md"
+            exit 1
+          fi
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the pinned Terraform version
+        id: terraform-version
+        # As in validate.yml: setup-terraform has no version-file input and
+        # defaults to `latest`, so .terraform-version is read here and passed
+        # in explicitly. It matters more on this side of the line — the version
+        # that plans an environment is the version that will apply it.
+        #
+        # Which is why the value is checked rather than interpolated straight
+        # into the output. An empty one is not an error setup-terraform
+        # reports: it falls back toward `latest`, and the plan below would run
+        # against real state on a version this repository never pinned, in
+        # silence.
+        run: |
+          version="$(cat .terraform-version)"
+          if [ -z "$version" ]; then
+            echo "::error::.terraform-version is empty; the plan would run on" \
+              "an unpinned Terraform"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.terraform-version.outputs.version }}
+          # The wrapper rewrites stdout to publish it as step outputs, which
+          # would mangle the plan text this workflow captures and comments
+          # with, and nothing here reads those outputs.
+          terraform_wrapper: false
+
+      - name: Assume the plan role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          # The session name is what CloudTrail records, so it is made to say
+          # which run and which environment rather than "GitHubActions".
+          role-session-name: plan-${{ matrix.environment }}-${{ github.run_id }}
+
+      # Terraform is invoked directly here, and this is the one place in CI
+      # that does not go through the Makefile. Its `plan-<env>` targets init
+      # with `-backend-config=backend.hcl`, a gitignored per-account file that
+      # does not exist on a runner and should not: CI's four backend values
+      # come from repository variables instead. Two paths to the same values,
+      # neither a copy of the other, which is what envs/*/backend.tf describes.
+      #
+      # The state key is built from the environment name rather than written
+      # down, because that name is a four-way contract — the matrix value here,
+      # the directory under envs/, the key the plan role's policy scopes its
+      # grants to, and the GitHub Environment apply.yml will name. A second
+      # spelling of it is a permission error at best.
+      - name: Initialise the backend
+        id: init
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          terraform -chdir="envs/${ENVIRONMENT}" init \
+            -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${ENVIRONMENT}/terraform.tfstate" \
+            -backend-config="region=${TF_STATE_REGION}" \
+            -backend-config="use_lockfile=true" \
+            2>&1 | tee "${RUNNER_TEMP}/init.log"
+
+      # `-lock-timeout` rather than `-lock=false`: a plan that refreshes writes
+      # nothing to state but does take the lock, and the plan role is granted
+      # the `.tflock` object precisely so it can. Waiting five minutes is what
+      # turns a second pull request planning the same environment from a hard
+      # failure into a slow success.
+      - name: Plan
+        id: plan
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          terraform -chdir="envs/${ENVIRONMENT}" plan \
+            -no-color \
+            -input=false \
+            -lock-timeout=5m \
+            2>&1 | tee "${RUNNER_TEMP}/plan.log"
+
+      # One comment per environment, updated in place, posted whether the plan
+      # succeeded or not — a failed plan is exactly when a reviewer should not
+      # have to go and find the log.
+      #
+      # Hand-rolled rather than a sticky-comment action, on a narrower argument
+      # than "no dependencies". The body has to be assembled here anyway, for
+      # the truncation below, so the action would be doing the last two calls
+      # only — and it would be doing them with `pull-requests: write` inside
+      # the one job in this repository that also holds AWS credentials. That is
+      # the job to keep third-party code out of. The upsert is a marker, a
+      # search and a PATCH.
+      - name: Post the plan as a sticky pull request comment
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENVIRONMENT: ${{ matrix.environment }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # An HTML comment on the first line, one per environment, is what
+          # makes the comment sticky: it is invisible when rendered and it is
+          # what the search below matches on. Keying it on the environment is
+          # what lets a pull request that changes both carry two comments
+          # rather than two halves of one that overwrite each other.
+          marker="<!-- terraform-plan: ${ENVIRONMENT} -->"
+
+          # The plan log when a plan ran, the init log otherwise — a backend
+          # misconfiguration or a refused AssumeRole explains itself there, and
+          # a comment saying only "the plan failed" would be worse than none.
+          #
+          # Which log exists is also how far the job got, and that is read from
+          # the files rather than from `steps.plan.outcome`: a step that never
+          # ran because an earlier one failed is absent from the `steps`
+          # context entirely, so its outcome is the empty string rather than
+          # "skipped", and a case arm written for "skipped" would never fire.
+          if [ -s "${RUNNER_TEMP}/plan.log" ]; then
+            log="${RUNNER_TEMP}/plan.log"
+          elif [ -s "${RUNNER_TEMP}/init.log" ]; then
+            log="${RUNNER_TEMP}/init.log"
+          else
+            log=""
+          fi
+
+          if [ "$PLAN_OUTCOME" = success ]; then
+            # Terraform's own one-line verdict, which is the line a reviewer
+            # reads first. It is quoted rather than reconstructed.
+            headline="$(grep -m 1 -E '^(Plan: |No changes\.)' "$log" || true)"
+            : "${headline:=The plan succeeded.}"
+          elif [ "$log" = "${RUNNER_TEMP}/plan.log" ]; then
+            headline="**The plan failed.**"
+          elif [ -n "$log" ]; then
+            headline="**\`terraform init\` failed, so no plan was produced.**"
+          else
+            headline="**The job failed before Terraform ran.**"
+          fi
+
+          # A comment body is capped at 65536 characters and the API rejects an
+          # over-long one outright, which would lose the comment entirely on
+          # exactly the large plans most worth reading. The tail is kept rather
+          # than the head: Terraform prints its summary line last and its
+          # errors last, so the end of the output is the part that carries the
+          # verdict. `iconv -c` drops the partial character `tail -c` can leave
+          # at the cut, which would otherwise make the request body invalid
+          # UTF-8.
+          budget=60000
+          body="${RUNNER_TEMP}/comment.md"
+
+          # Markdown wants backticks and a shell reads a backtick as command
+          # substitution, so they are composed from an escape rather than
+          # written out — a literal one here is an expression every linter that
+          # looks at this file has to be told to ignore. The fence is four of
+          # them, so a fence inside the plan output cannot close it early.
+          tick="$(printf '\140')"
+          fence="${tick}${tick}${tick}${tick}"
+
+          {
+            printf '%s\n' "$marker"
+            printf '### Terraform plan: %s%s%s\n\n' "$tick" "$ENVIRONMENT" "$tick"
+            printf '%s\n\n' "$headline"
+            printf 'Commit %s%s%s — [run log](%s)\n\n' \
+              "$tick" "${HEAD_SHA:0:7}" "$tick" "$RUN_URL"
+            printf '<details><summary>Show Terraform output</summary>\n\n'
+            printf '%sterraform\n' "$fence"
+            if [ ! -s "$log" ]; then
+              printf 'No Terraform output was captured. See the run log.\n'
+            elif [ "$(wc -c < "$log")" -gt "$budget" ]; then
+              printf '[truncated to the last %s characters; the full output is in the run log]\n\n' "$budget"
+              tail -c "$budget" "$log" | iconv -c -f UTF-8 -t UTF-8
+            else
+              cat "$log"
+            fi
+            printf '\n%s\n\n' "$fence"
+            printf '</details>\n'
+          } > "$body"
+
+          # `--paginate` because a long-lived pull request outgrows one page,
+          # and the marker is compared as a literal by awk rather than
+          # interpolated into a jq filter. Only this workflow's own comments
+          # are candidates: the marker is invisible when rendered, so a reviewer
+          # who quotes one in a reply would otherwise have their comment
+          # silently overwritten by the next push.
+          #
+          # The listing is captured before it is searched rather than piped
+          # into awk. An `exit` on the first match closes the pipe under a
+          # writer that may not have finished, and this script runs with
+          # `pipefail`, so the reader's shortcut would surface as the whole
+          # step failing on a SIGPIPE — on long pull requests only, which is
+          # the worst possible place for it to start happening.
+          comments="$(
+            gh api --paginate "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --jq '.[] | select(.user.type == "Bot") | [.id, (.body | split("\n")[0])] | @tsv'
+          )"
+          comment_id="$(
+            awk -F '\t' -v marker="$marker" \
+              '$2 == marker { print $1; exit }' <<< "$comments"
+          )"
+
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH \
+              "/repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+              --field "body=@${body}" > /dev/null
+            echo "updated comment ${comment_id}"
+          else
+            gh api --method POST \
+              "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --field "body=@${body}" > /dev/null
+            echo "posted a new comment"
+          fi
+
+  # The required check, and the only job in this file that is one.
+  #
+  # The matrix above cannot be required, and that is the trap this job exists
+  # to disarm: a pull request that changes no environment expands it to zero
+  # entries, no check run is ever created under `plan (stage)` or any other
+  # name, and the pull request sits on "Expected — Waiting for status to be
+  # reported" until somebody bypasses the ruleset. Every documentation,
+  # CODEOWNERS and workflow change is that pull request.
+  #
+  # It also keeps the required set credential-free. It touches no AWS and needs
+  # no token, so it reports on pull requests that cannot assume a role at all —
+  # a Dependabot bump of an action SHA, which changes no environment, goes
+  # green here with no credential in sight. A required check that needs
+  # credentials is a required check bot-authored pull requests can never
+  # satisfy.
+  #
+  # The verdict is computed in the script rather than expressed as an `if:`,
+  # for a reason worth stating: a job whose `if:` is false is *skipped*, and a
+  # skipped job is not a failed one. Writing the "did anything break?" logic
+  # into the condition would produce a gate that silently reports nothing on
+  # the only runs where it has something to say.
+  plan-gate:
+    name: plan-gate
+    needs: [detect, plan]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Report whether every changed environment planned
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          ENVIRONMENTS: ${{ needs.detect.outputs.environments }}
+        run: |
+          echo "detect:       ${DETECT_RESULT}"
+          echo "plan:         ${PLAN_RESULT}"
+          echo "environments: ${ENVIRONMENTS:-unknown}"
+
+          # A detect job that did not succeed means the set of environments to
+          # plan is unknown, which is not the same as empty and must not be
+          # treated as it.
+          if [ "$DETECT_RESULT" != "success" ]; then
+            echo "::error::the environments to plan could not be determined"
+            exit 1
+          fi
+
+          # `plan` is a matrix job, so this one result is the whole matrix:
+          # `failure` if any environment failed, `skipped` only if the matrix
+          # was empty. `cancelled` is a plan nobody got, which is not a plan
+          # that passed.
+          case "$PLAN_RESULT" in
+            success)
+              echo "every changed environment planned"
+              ;;
+            skipped)
+              # `skipped` is a pass only when there was genuinely nothing to
+              # plan, and that is checked rather than assumed. It is equally
+              # what a plan job skipped for some *other* reason reports — one
+              # more clause on its `if:`, an actor or draft filter, a `paths:`
+              # guard — and read as a pass, this arm would hand a green light
+              # to a pull request that changed an environment and never planned
+              # it. That is the failure this whole job exists to prevent.
+              if [ "$ENVIRONMENTS" != "[]" ]; then
+                echo "::error::no plan ran for ${ENVIRONMENTS:-an unknown set}," \
+                  "which is not the same as there being nothing to plan"
+                exit 1
+              fi
+              echo "no environment changed; there was nothing to plan"
+              ;;
+            *)
+              echo "::error::at least one environment did not plan (${PLAN_RESULT})"
+              exit 1
+              ;;
+          esac
