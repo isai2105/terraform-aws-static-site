@@ -483,6 +483,69 @@ written into each of them literally. Every dispatch is then refused until both a
 check above reads the listing endpoint that carries each policy's id but projects only the names,
 so read it again without the `--jq` to get the ids, `DELETE` each policy, and POST the new name.
 
+### 7.5 The `orphaned-resources` label
+
+```bash
+gh label create orphaned-resources --force --color d93f0b \
+  --description 'AWS resources left behind by a failed automated teardown; needs manual cleanup'
+
+gh api /repos/<owner>/<repo>/labels/orphaned-resources --jq '.name, .color, .description'
+```
+
+which prints, on a repository configured as above:
+
+```
+orphaned-resources
+d93f0b
+AWS resources left behind by a failed automated teardown; needs manual cleanup
+```
+
+and, where the label is missing, `gh: Not Found (HTTP 404)` on stderr with a non-zero exit.
+
+`e2e.yml`'s `if: failure()` job re-runs the destroy and then files a tracking issue with
+`gh issue create --label orphaned-resources`. That command resolves label names *before* it
+creates anything: `AddMetadataToIssueParams` is called at `pkg/cmd/issue/create/create.go:404`
+and `api.IssueCreate` only at `:410`, with the lookup underneath returning
+`'orphaned-resources' not found` from `api/queries_repo.go:818` (read from `cli/cli` v2.98.0,
+2026-08-28). So on a repository without this label no issue is created at all, and the one job
+whose whole purpose is to make a failed teardown visible fails instead — on the only kind of run
+that ever reaches it.
+
+**That is `gh`'s behaviour, not GitHub's.** The REST reference says nothing either way about
+`POST /repos/{owner}/{repo}/issues` carrying a label the repository does not have, and nothing
+here has tested it. The guarantee above is therefore a property of the command the workflow
+happens to use: a cleanup job rewritten around `gh api .../issues` would not inherit it, and
+this section would go on justifying itself with a failure that no longer occurs. Keep
+`gh issue create`, or re-derive this section against whatever replaces it.
+
+**Verify with the single-label endpoint, not `gh label list`.** The obvious readback —
+`gh label list --json name,color,description --jq '.[] | select(.name == "orphaned-resources")'`
+— prints nothing and exits **0** when the label is absent, which was measured rather than
+assumed. A `create` sent to the wrong repository, or a name typed one character off, then reads
+as a clean pass, and nothing references the label again until the first failed teardown: the
+outcome this section exists to prevent, reintroduced by its own check. `GET .../labels/<name>`
+answers 404 and a non-zero exit instead — the shape 7.4 already leans on — and it needs no
+`--limit`, because it never lists anything.
+
+**`--force`, and where it does not belong.** Without it, `gh label create` on a name that
+already exists fails with `label with name "orphaned-resources" already exists` and exits 1, so
+§7 would carry a step that breaks on a second walk-through — which 7.1 names as a defect in a
+section whose siblings are re-runnable. With it, a repeat run is a no-op at exit 0. That is a
+person re-walking a runbook. A `gh label create --force` step inside `e2e.yml`'s cleanup job is
+a different call wearing the same flag: a machine repairing its own precondition at the moment
+it depends on it. It would be self-healing, and it is the obvious shortcut. It also puts a
+repository mutation ahead of the report, in a job that by construction runs only after something
+has already gone wrong — one more thing that can fail where nothing is left to catch it. The
+reasoning is 7.4's: a precondition created lazily is missing exactly when it is first needed.
+
+The name is a contract with `.github/workflows/e2e.yml`. The match is case-insensitive —
+`strings.EqualFold` at `api/queries_repo.go:811` — so the contract binds spelling and
+punctuation rather than case; nothing here spends that latitude, and treating the string as
+exact costs nothing. What it has, unlike the environment names above, is no loud half at all:
+rename or delete the label and nothing objects, the repository stays green for as long as the
+teardowns keep working, and the run that discovers the label is gone is the run that needed the
+issue.
+
 ## 8. A token for the scheduled provider-lock refresh *(needed from build-plan commit 25)*
 
 Not required to bootstrap; required before the provider-lock refresh workflow is any use, and
