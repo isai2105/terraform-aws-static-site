@@ -69,3 +69,4 @@ module "site" {
 }
 
 # Second verification pass. This branch is never merged.
+# Second push, to exercise the sticky update path.
