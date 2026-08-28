@@ -244,7 +244,15 @@ jobs:
       # A fresh clone with no bootstrap behind it has none of these set, and
       # every one of them fails somewhere unhelpful: an empty role ARN reads as
       # "Credentials could not be loaded", an empty bucket as an S3 error about
-      # a name that is not in the file. Section 6 of the runbook sets all four.
+      # a name that is not in the file. Section 6 of the runbook sets all three.
+      #
+      # All three, and none of them environment-scoped, which is the one place
+      # this file and apply.yml legitimately differ. There is one plan role for
+      # every environment — it is trusted on the `pull_request` subject, which
+      # carries no environment component at all — where there is one apply role
+      # per environment, published as an environment-scoped
+      # AWS_APPLY_ROLE_ARN that only a job declaring `environment:` resolves.
+      # This workflow declares none and needs none.
       - name: Check the repository variables this workflow needs
         env:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
@@ -259,9 +267,11 @@ jobs:
           done
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::unset repository variables: ${missing[*]}. They are" \
-              "set by the four commands in the bootstrap's" \
+              "set by the repository-level lines of the bootstrap's" \
               "repository_variable_commands output; see section 6 of" \
-              "docs/BOOTSTRAP.md"
+              "docs/BOOTSTRAP.md. The remaining lines of that output are" \
+              "environment-scoped and belong to apply.yml, not to this" \
+              "workflow"
             exit 1
           fi
 

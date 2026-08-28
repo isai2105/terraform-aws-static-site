@@ -1,11 +1,12 @@
 # Bootstrap runbook
 
 `bootstrap/` is the chicken-and-egg layer. It creates the S3 bucket that every other root in
-this repository keeps its state in, the GitHub Actions OIDC provider, and the two roles CI
-assumes — the things that have to exist before any environment can be applied at all.
+this repository keeps its state in, the GitHub Actions OIDC provider, and the roles CI assumes —
+one read-only plan role, and one apply role per environment — the things that have to exist
+before any environment can be applied at all.
 
 It is applied **once, by hand, on local state**, and it is the only root in this repository
-ever applied with an elevated AWS identity. Everything afterwards runs through the two roles it
+ever applied with an elevated AWS identity. Everything afterwards runs through the roles it
 creates, from a workflow, with no long-lived access key anywhere.
 
 This document is written for a stranger with an empty AWS account. Follow it top to bottom.
@@ -79,7 +80,8 @@ can be removed with claim customisation.
 
 `name_prefix` becomes part of a globally unique S3 bucket name, so pick something a stranger is
 unlikely to have taken. `environments` is the list of environment names this repository
-deploys; it drives the state keys, the apply role's trusted-subject list, and the GitHub
+deploys; it drives the state keys, one apply role per name — each trusting only that
+environment's OIDC subject and scoped to only that environment's state — and the GitHub
 Environments you create in section 7.4.
 
 Nothing in this file is sensitive, which is why it is committed at all. Keep it that way: no
@@ -112,8 +114,12 @@ deliberately not self-hosting — it is the root that creates the bucket remote 
 so there is nowhere to put remote state until it has already run.
 
 That file is also the only place the state bucket's `random_id` suffix is remembered. Lose it
-and the bucket, the provider and both roles have to be adopted back in one `terraform import`
-at a time, against a bucket name you can only recover by listing the account.
+and the bucket, the provider and every role have to be adopted back in one `terraform import`
+at a time, against a bucket name you can only recover by listing the account. Count the roles
+before you start: it is the plan role plus **one apply role per name in `environments`**, so a
+recovery that imports the bucket, the provider and two roles is short by one for every
+environment past the first, and finds out at the next apply with an `EntityAlreadyExists` on a
+role it never imported.
 
 Back it up somewhere outside the working copy.
 
@@ -128,12 +134,21 @@ The four that matter downstream:
 | Output | Used by |
 |---|---|
 | `backend_init_command` | the literal `init -backend-config=…` line for an environment root |
-| `repository_variable_commands` | the four `gh variable set` calls in section 6 |
+| `repository_variable_commands` | the `gh variable set` calls in sections 6 and 7.4 |
 | `oidc_provider_arn` | the `static-site` module, when it creates the app repository's deploy role |
 | `site_bucket_name_prefix` | the name every site bucket must be created under (section 10) |
 
 `terraform -chdir=bootstrap output -raw <name>` prints one without quoting, which is what you
 want when piping it into anything.
+
+One output is not a string and does not take `-raw`. `ci_apply_role_arns` is a **map keyed by
+environment name**, because there is one apply role per environment rather than one role trusting
+all of them — `bootstrap/oidc.tf` says what that split does and does not buy. Read a single entry
+through `-json`:
+
+```bash
+terraform -chdir=bootstrap output -json ci_apply_role_arns | jq -r '.["<env>"]'
+```
 
 ## 6. Set the repository variables
 
@@ -141,12 +156,49 @@ want when piping it into anything.
 terraform -chdir=bootstrap output -raw repository_variable_commands
 ```
 
-Run the four lines it prints. They set `TF_STATE_BUCKET`, `AWS_REGION`, `AWS_PLAN_ROLE_ARN` and
-`AWS_APPLY_ROLE_ARN` as repository **variables**, not secrets — `bootstrap/outputs.tf` argues
-why at the point the values are produced, and the short version is that masking a role ARN
-turns the single most common OIDC failure into an unreadable one.
+Run the first three lines it prints now. They set `TF_STATE_BUCKET`, `AWS_REGION` and
+`AWS_PLAN_ROLE_ARN` as repository **variables**, not secrets — `bootstrap/outputs.tf` argues why
+at the point the values are produced, and the short version is that masking a role ARN turns the
+single most common OIDC failure into an unreadable one.
 
-Without these four, `plan.yml`, `apply.yml` and `e2e.yml` have no `role-to-assume` and no
+**The remaining lines are the `--env` ones, and they belong in section 7.4 rather than here.**
+They set `AWS_APPLY_ROLE_ARN` on a GitHub Environment, and an environment variable is a
+subresource of the environment: with no environment there is nothing to set it on, and the call
+returns a 404 rather than creating one. Section 7.4 creates both environments, so the `--env`
+lines run at the end of it — one step further down, with the same output in front of you.
+
+That `AWS_APPLY_ROLE_ARN` is scoped per environment rather than to the repository is what carries
+the per-environment apply roles into the workflows without a single workflow naming a role.
+GitHub resolves a configuration variable at the lowest level it is defined at — *"if an
+organization, repository, and environment all have a variable with the same name, the
+environment-level variable takes precedence"* (docs.github.com/en/actions/reference/
+workflows-and-actions/variables, read 2026-08-28) — and every job in `apply.yml` declares an
+environment, because the apply roles are trusted on no other subject. One
+`vars.AWS_APPLY_ROLE_ARN` expression therefore resolves to stage's role in a stage job and prod's
+in a prod job, and no workflow needed editing to get that.
+
+**`AWS_APPLY_ROLE_ARN` must not also exist as a repository variable.** Nothing would shadow it —
+the environment value wins wherever both are defined — but it would sit there as a second,
+unscoped answer to the same question: it survives every re-apply of this root, it goes stale the
+first time a role ARN changes, and it hands a job that forgot to declare an environment a
+plausible-looking ARN to fail at `AssumeRoleWithWebIdentity` with, instead of `apply.yml`'s own
+unset-variable check naming the variable and pointing back here. A bootstrap applied before the
+apply role was split per environment has one; delete it.
+
+```bash
+gh variable list   # expect exactly: TF_STATE_BUCKET, AWS_REGION, AWS_PLAN_ROLE_ARN
+```
+
+If `AWS_APPLY_ROLE_ARN` is in that listing, delete it with
+`gh variable delete AWS_APPLY_ROLE_ARN`. On a fresh clone it will not be — nothing above creates
+it at the repository level — which is why the delete is written as a conditional sentence rather
+than as a fourth line in the block above. `gh variable delete` has no `--force`, and it exits
+non-zero on a variable that does not exist, so a copy-pasted block containing it would fail on
+the **first** walk-through of this runbook rather than the second. Section 7.1 sets that standard
+and 7.5 keeps it with `gh label create --force`; this is the same rule where no flag exists to
+honour it with.
+
+Without all of these, `plan.yml`, `apply.yml` and `e2e.yml` have no `role-to-assume` and no
 backend configuration, and a fresh clone is unrunnable.
 
 ## 7. Configure the GitHub repository
@@ -305,10 +357,11 @@ gh api /repos/<owner>/<repo> --jq '{squash_merge_commit_title, squash_merge_comm
 
 ### 7.4 The two GitHub Environments
 
-`stage` and `prod` are not decoration on the apply jobs. The apply role is trusted on the
-`environment:<env>` subject and on no ref at all — the claim, and why it *replaces* the ref
-rather than joining it, are in "What a cloner needs to know" below — so a job that does not name
-an environment cannot assume the role at all. What that does **not** buy is any assurance the
+`stage` and `prod` are not decoration on the apply jobs. There is one apply role per
+environment, each trusted on that environment's `environment:<env>` subject and on no ref at all
+— the claim, and why it *replaces* the ref rather than joining it, are in "What a cloner needs
+to know" below — so a job that does not name an environment matches no role's trust policy and
+cannot assume any of them. What that does **not** buy is any assurance the
 environment was ever configured, and the failure runs the wrong way round:
 
 **Create both before any workflow names one.** GitHub creates an environment implicitly the
@@ -320,7 +373,7 @@ because it exists.
 One limit before the calls, because it is not recoverable by editing the payload: environments
 are configurable on a public repository under every plan, but on a **private** one only under
 GitHub Pro, Team or Enterprise. A private clone on Free gets no reviewer and no branch policy,
-and the apply role's `environment:` trust then gates nothing on its own.
+and the apply roles' `environment:` trust then gates nothing on its own.
 
 `stage` is deliberately self-service. A reviewer requirement whose only reviewer is the person
 dispatching records an approval that means nothing — which is section 7.2's conclusion about
@@ -456,11 +509,29 @@ means the named policy was never created or did not survive an edit: re-run the 
 cannot duplicate one — the reference documents a 303 for a branch name pattern that already
 exists — though what `gh` prints for that response has not been checked here.
 
+**Now set `AWS_APPLY_ROLE_ARN` on each environment** — the `--env` lines section 6 deferred to
+here, because until the two PUTs above there was no environment to set them on:
+
+```bash
+terraform -chdir=bootstrap output -raw repository_variable_commands
+```
+
+Run every line that carries `--env`, then read them back. Each environment holds its own role
+ARN, and the two must differ; two environments showing the same ARN means one `--env` was
+mistyped, which is silent — the job authenticates, against the wrong environment's role, and
+fails later at the state key:
+
+```bash
+for env in stage prod; do
+  gh variable get AWS_APPLY_ROLE_ARN --env "$env"
+done
+```
+
 **Expect a prod dispatch to cost two approvals, not one.** Both jobs in `apply.yml` name the
-environment — the plan job has to, because from a dispatch the apply role is the only credential
-that reaches prod state, and it is trusted on the `environment:` subject alone — and every job
-that names an environment creates its own deployment against it. Two deployments per dispatch is
-measured: a `stage` destroy produced one per job, and the header comment in
+environment — the plan job has to, because from a dispatch prod's own apply role is the only
+credential that reaches prod state, and it is trusted on the `environment: prod` subject alone —
+and every job that names an environment creates its own deployment against it. Two deployments
+per dispatch is measured: a `stage` destroy produced one per job, and the header comment in
 `.github/workflows/apply.yml` names that run and both deployment ids. That prod therefore asks
 the reviewer twice — once to take the plan, once to apply it, and only the second request has a
 plan to read — follows from each of those two deployments having to clear prod's gate, and has
@@ -468,14 +539,14 @@ not been watched happen: nothing has been dispatched against `prod` yet. Worth k
 second prompt arrives looking like a stuck run.
 
 **The environment names are a verbatim contract.** The same two strings are `environments` in
-`bootstrap/terraform.tfvars`, the `:environment:<env>` subjects in the apply role's trust policy,
-and the `<env>/terraform.tfstate` state keys. The two halves break in opposite directions, which
-is the reason to spell it out: change the name in `bootstrap/terraform.tfvars` alone and the next
-dispatch is refused at `AssumeRoleWithWebIdentity`, loudly, from a workflow that reads as
-correct. Rename or delete the GitHub Environment alone and nothing is refused at all —
-`apply.yml` still names the old string, GitHub re-creates it on reference with no protection
-rules, the OIDC subject is unchanged, and the apply runs ungated. The loud failure is the safe
-one.
+`bootstrap/terraform.tfvars`, the `:environment:<env>` subject each apply role's trust policy
+names, the `<env>` in each apply role's own name, and the `<env>/terraform.tfstate` state keys.
+The two halves break in opposite directions, which is the reason to spell it out: change the name
+in `bootstrap/terraform.tfvars` alone and the next dispatch is refused at
+`AssumeRoleWithWebIdentity`, loudly, from a workflow that reads as correct. Rename or delete the
+GitHub Environment alone and nothing is refused at all — `apply.yml` still names the old string,
+GitHub re-creates it on reference with no protection rules, the OIDC subject is unchanged, and
+the apply runs ungated. The loud failure is the safe one.
 
 **A default-branch rename breaks both environments.** The ruleset in section 7.1 survives one,
 because it matches `~DEFAULT_BRANCH` rather than a name; these policies do not, because `main` is
@@ -640,15 +711,16 @@ repo:<owner>@<owner-id>/<repo>@<repo-id>:pull_request
 repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:<env>
 ```
 
-Those are the two subjects the plan role and the apply role trust. Both were read out of real
-tokens rather than assembled from documentation.
+Those are the subject shapes the plan role and the apply roles trust — one `pull_request` subject
+for plan, and one `environment:<env>` subject for each apply role, which is one role per
+environment. Both shapes were read out of real tokens rather than assembled from documentation.
 
 **The `environment:` claim replaces the ref claim; it does not appear alongside it.** This was
 measured on a `push` run and a `pull_request` run whose `ref` claims differed while their `sub`
 claims were byte-identical. Two consequences a cloner will otherwise trip on:
 
-- the apply role is scoped by **environment name**, never by branch, so a job that fails to
-  declare `environment:` cannot assume it at all — which is exactly what makes the prod
+- the apply roles are scoped by **environment name**, never by branch, so a job that fails to
+  declare `environment:` cannot assume any of them at all — which is exactly what makes the prod
   reviewer gate real rather than decorative;
 - the branch restriction therefore cannot live in IAM at the same time. It lives in each
   GitHub Environment's **deployment branch policy** instead, configured in section 7.4,
@@ -656,16 +728,20 @@ claims were byte-identical. Two consequences a cloner will otherwise trip on:
   time a job references one, with no protection rules at all.
 
 **Adding an environment is an edit here, not just in `envs/`.** Append the name to
-`environments` in `bootstrap/terraform.tfvars` and re-apply this root. The apply role cannot be
-assumed from an environment its trust policy does not name, and the failure surfaces as an
-`AssumeRoleWithWebIdentity` refusal in a workflow that looks correct.
+`environments` in `bootstrap/terraform.tfvars` and re-apply this root, which mints that
+environment's apply role; then create the GitHub Environment (section 7.4) and set
+`AWS_APPLY_ROLE_ARN` on it. An environment the list does not name has no apply role at all, and
+one whose role exists but whose variable was never set has nothing to put in `role-to-assume` —
+the first surfaces as an `AssumeRoleWithWebIdentity` refusal, the second as `apply.yml`'s
+unset-variable check, both from a workflow that looks correct.
 
 **Site buckets must be named under `site_bucket_name_prefix`.** That is a contract, not a
-convention. The apply role's S3 grant is a name pattern — a site bucket's name is unknowable in
-advance, since it carries a random suffix that is re-minted every cycle — and the prefix is
-what keeps that pattern disjoint from the state bucket's own name. A site bucket created
-outside it cannot be managed by CI; a naming scheme that collapsed the two would hand the apply
-role bucket-level control over the one bucket the whole design depends on surviving.
+convention. The apply roles share one S3 grant and it is a name pattern — a site bucket's name
+is unknowable in advance, since it carries a random suffix that is re-minted every cycle — and
+the prefix is what keeps that pattern disjoint from the state bucket's own name. A site bucket
+created outside it cannot be managed by CI; a naming scheme that collapsed the two would hand
+every apply role bucket-level control over the one bucket the whole design depends on
+surviving.
 
 **No long-lived AWS access key exists anywhere in either repository.** If you find yourself
 creating one to make something work, that is the bug.
