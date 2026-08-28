@@ -9,9 +9,10 @@
 # arrived with the commit that created the directory they point at, and `test`
 # arrived with the module tests.
 #
-# The file is in two halves. Everything down to `test` is a check: it reaches no
-# AWS account, needs no credentials, and is safe to require on a pull request.
-# Everything after it talks to AWS.
+# The file is in two halves. Everything down to `audit-online` is a check and
+# reaches no AWS account; everything after it talks to AWS. All but one of the
+# checks are also credential-free and safe to require on a pull request —
+# `audit-online` is the exception, and it argues for itself where it sits.
 
 # Bash rather than /bin/sh, with `-e -u -o pipefail`, so a command that fails
 # inside a loop or a pipeline fails the target instead of being swallowed.
@@ -39,8 +40,8 @@
 # A recipe that genuinely needs a plain shell has to override `SHELL` too.
 #
 # Verified against GNU Make 3.81 (macOS 15) and GNU Make 4.3 (Ubuntu 24.04,
-# which is what `ubuntu-latest` runs), including the opt-out above failing on
-# both.
+# which is the image every job in .github/workflows/ now pins), including the
+# opt-out above failing on both.
 SHELL := /usr/bin/env bash -euo pipefail
 .SHELLFLAGS := -euo pipefail -c
 
@@ -89,11 +90,34 @@ TERRAFORM_DOCS_VERSION := 0.24.0
 # it — a different table, generated in silence.
 TERRAFORM_DOCS_CONFIG := $(CURDIR)/.terraform-docs.yml
 
+# And zizmor, on the same terms as the three above and for the fourth time: no
+# version file of its own, so this is the pin and validate.yml reads it back
+# through `print-zizmor-version`.
+#
+# It is the only tool here that reads no Terraform. What it audits is
+# .github/workflows/ itself — an unpinned `uses:`, a `permissions:` block wider
+# than the job needs, a checkout that leaves a credential on disk for every
+# later step — and its rules are compiled into the binary exactly as Trivy's
+# are, so this number fixes what counts as a hardening failure and not only who
+# reports it.
+ZIZMOR_VERSION := 1.29.0
+
+# The runner image, and the fifth pin in this file rather than a sixth rule
+# nobody checks. It is the odd one out in two ways: the value it pins lives in
+# .github/workflows/ rather than in a binary on PATH, and there is no upstream
+# tool that reads it — so `audit-policy` below is what makes it a pin instead of
+# a convention. The argument for pinning it at all is rule 4 of the policy at
+# the top of validate.yml: `ubuntu-latest` has already moved once, from 22.04 to
+# 24.04, on a schedule GitHub picks rather than this repository.
+RUNNER_IMAGE := ubuntu-24.04
+
 .PHONY: help fmt fmt-check validate lint scan docs docs-check test \
+	audit audit-online audit-policy \
 	plan-stage apply-stage destroy-stage \
 	plan-prod apply-prod destroy-prod \
-	check-terraform check-tflint check-trivy check-terraform-docs \
-	print-tflint-version print-trivy-version print-terraform-docs-version
+	check-terraform check-tflint check-trivy check-terraform-docs check-zizmor \
+	print-tflint-version print-trivy-version print-terraform-docs-version \
+	print-zizmor-version
 
 help: ## Show the available targets.
 	@echo "Usage: make <target>"
@@ -106,6 +130,8 @@ help: ## Show the available targets.
 	@echo "tflint pinned by this Makefile:         $(TFLINT_VERSION)"
 	@echo "trivy pinned by this Makefile:          $(TRIVY_VERSION)"
 	@echo "terraform-docs pinned by this Makefile: $(TERRAFORM_DOCS_VERSION)"
+	@echo "zizmor pinned by this Makefile:         $(ZIZMOR_VERSION)"
+	@echo "runner image pinned by this Makefile:   $(RUNNER_IMAGE)"
 
 # Internal guard, deliberately absent from `help`: not a check in its own right,
 # but a prerequisite of every target that shells out to terraform. Running a
@@ -206,6 +232,30 @@ check-terraform-docs:
 		exit 1; \
 	fi
 
+# And a fourth guard, for zizmor, with trivy's stakes reached from the other
+# side of the repository: the audit rules are compiled into the binary, so an
+# older zizmor passes a workflow a newer one rejects — and what it would have
+# rejected is the hardening `audit` exists to hold in place.
+check-zizmor:
+	@if ! command -v zizmor >/dev/null 2>&1; then \
+		echo "make: zizmor was not found on PATH." >&2; \
+		echo "      this repository pins zizmor $(ZIZMOR_VERSION)." >&2; \
+		echo "      install it with:  brew install zizmor" >&2; \
+		echo "                   or:  from https://github.com/zizmorcore/zizmor/releases/tag/v$(ZIZMOR_VERSION)" >&2; \
+		exit 1; \
+	fi; \
+	out="$$(zizmor --version)"; \
+	actual="$${out#zizmor }"; \
+	if [ "$$actual" != "$(ZIZMOR_VERSION)" ]; then \
+		echo "make: zizmor version mismatch." >&2; \
+		echo "      expected $(ZIZMOR_VERSION)  (pinned in the Makefile)" >&2; \
+		echo "      found    $$actual  ($$(command -v zizmor))" >&2; \
+		echo "      zizmor has no version manager, so pick the matching build:" >&2; \
+		echo "        brew upgrade zizmor   (when the formula is at $(ZIZMOR_VERSION))" >&2; \
+		echo "        https://github.com/zizmorcore/zizmor/releases/tag/v$(ZIZMOR_VERSION)" >&2; \
+		exit 1; \
+	fi
+
 # Also internal: the one place validate.yml can ask which tflint this
 # repository pins, so the workflow and the guard cannot disagree.
 print-tflint-version:
@@ -219,6 +269,10 @@ print-trivy-version:
 # And for terraform-docs.
 print-terraform-docs-version:
 	@echo "$(TERRAFORM_DOCS_VERSION)"
+
+# And for zizmor.
+print-zizmor-version:
+	@echo "$(ZIZMOR_VERSION)"
 
 # Formatting is purely textual, so it is correct from the repository root and
 # recursive: no per-directory initialisation is involved. `terraform fmt` skips
@@ -450,7 +504,7 @@ docs: check-terraform-docs ## Regenerate the terraform-docs block in every modul
 docs-check: check-terraform-docs ## Fail if any module README's generated block is out of date.
 	$(call terraform_docs,--output-check)
 
-# The module's own tests, and the last target above the AWS boundary below.
+# The module's own tests.
 #
 # Targets are discovered rather than listed, for the third time and the same
 # reason `validate` and the documentation targets give: a list written against
@@ -535,14 +589,231 @@ test: check-terraform ## Run the module tests with `terraform test`.
 		exit 1; \
 	fi
 
+# The workflows themselves, audited the way the Terraform is scanned: static
+# analysis against rules compiled into a pinned binary, with everything it
+# finds failing the build. It is the only check here that reads no Terraform at
+# all, and the last one that is credential-free.
+#
+# It does not overlap `actionlint`, which runs in validate.yml and in
+# .pre-commit-config.yaml and deliberately not from here, there being no
+# invocation for a target to own. actionlint asks whether a workflow is
+# *valid* — its syntax, its expressions, and through shellcheck its `run:`
+# blocks. zizmor asks whether it is *safe* — an unpinned `uses:`, a
+# `permissions:` block wider than the job needs, a checkout leaving a
+# credential on disk for every later step. Neither has anything to say about
+# the other's findings, which is why both run.
+#
+# `.` rather than a list of workflow files. zizmor collects workflows,
+# composite action definitions, the Dependabot configuration and
+# .pre-commit-config.yaml from wherever they are, honouring .gitignore, so
+# pointing it at the repository root is what keeps this target covering the
+# files added after it was written — the discovery argument `validate`, `docs`
+# and `test` each make for their own targets, and the one that will matter when
+# commit 25 adds .github/dependabot.yml.
+#
+# `--offline` is the flag that needs defending, and the reason is not economy.
+# zizmor selects its mode from whether a GitHub token is in the environment, so
+# without the flag this target audits one thing in a shell that has run
+# `gh auth login` and a smaller thing in a shell that has not — five audits'
+# worth — and a CI runner is always the shell that has not. That divergence runs
+# in the direction the top of .pre-commit-config.yaml names as the worst one:
+# the local gate failing on findings the CI gate cannot see, which teaches a
+# contributor to distrust the green answer that comes back from GitHub. The
+# flag equalises the two, downward and on purpose.
+#
+# What it surrenders is those five. Four are documented as online-only and cost
+# little:
+#
+#   impostor-commit           a SHA that exists only in a fork of the repository
+#                             it is written against. Answered by hand instead —
+#                             every pin in .github/workflows/ was produced by
+#                             dereferencing the tag beside it through the API,
+#                             which asks the same question at the moment the pin
+#                             is written rather than on every run.
+#   ref-confusion             separates a tag from a branch, a question every
+#                             `uses:` here settles by being a SHA.
+#   stale-action-refs         `--pedantic`-only, so it does not run at this
+#                             persona in either mode.
+#   known-vulnerable-actions  queries GitHub's advisory database — a rule set
+#                             that moves without a commit, so an unchanged
+#                             repository could start failing on a Tuesday. The
+#                             argument `scan` makes for `--skip-check-update`,
+#                             landing in the same place.
+#
+# The fifth is `ref-version-mismatch`, and it is the one that costs something.
+# It compares a hash pin against the `# vX.Y.Z` comment written beside it, which
+# is rule 1 of the policy at the top of validate.yml — the comment the next bump
+# is read against. zizmor's own audit table marks it as working offline, so this
+# is measured rather than read, at v1.29.0: a checkout SHA labelled `# v4.1.1`
+# when the tag is v7.0.1 produces nothing at all offline, in either persona, and
+# `warning[ref-version-mismatch]` at medium with a token in the environment.
+#
+# So the version comment beside every pin is checked by nothing this target
+# runs, and commit 25 is where that stops being hypothetical — Dependabot and
+# the scheduled lock refresh are the two mechanisms that rewrite SHA/comment
+# pairs, and a conflict resolved by taking the new SHA and keeping the old
+# comment is green here, green in CI and green under actionlint. `audit-online`
+# below is the check that catches it. The obligation until commit 25 automates
+# it is to run that target whenever a `uses:` pin moves, and it is written down
+# here and beside rule 1 in validate.yml rather than left to memory.
+#
+# `audit-policy` runs first, as a prerequisite rather than as a second command
+# here, because a red target should name what broke. It carries the two rules of
+# the policy that zizmor has no audit for; the division of labour is enumerated
+# at the top of validate.yml and again on that target below.
+#
+# The default `regular` persona, not `--pedantic` or `--persona=auditor`. Every
+# run prints `(4 suppressed)`, and those four are the whole of what the stricter
+# personas add here: one `concurrency-limits` against validate.yml, which needs
+# no concurrency group because no job in it takes a lock, and three
+# `undocumented-permissions` against the `id-token: write` lines in plan.yml and
+# apply.yml.
+#
+# The second set is not fixable in the direction it looks, which is measured at
+# v1.29.0 rather than assumed: the audit is satisfied by a comment *trailing*
+# the permission and not by one on the line above it. All three of those lines
+# already carry an explanation — on the line above. Clearing them means either
+# repeating each one as a trailing comment or flattening it into one, in the
+# three places where the rationale is longest, and this repository trades the
+# other way. A gate whose green depends on a list of suppressions is a gate
+# nobody reads, and one bought by shortening the reasoning is worse than that.
+audit: check-zizmor audit-policy ## Audit the GitHub Actions workflows: zizmor, and the rules zizmor has no rule for.
+	zizmor --offline .
+
+# Rules 4 and 5 of the policy at the top of validate.yml, which nothing else in
+# this repository has a rule for.
+#
+# That gap is measured rather than assumed, and it is the whole reason this
+# target exists: at zizmor 1.29.0 and actionlint 1.7.12, a workflow carrying both
+# a floating `runs-on` and a job with no `timeout-minutes` produces zero findings
+# from zizmor at all three personas in both modes, and zero from actionlint. The
+# commit that wrote the policy named zizmor as its enforcement and then found
+# zizmor covers three of the six rules. Two of the other three are checked here.
+# The last, rule 2's `using: node24`, cannot be checked offline and says so where
+# it is written.
+#
+# Two greps rather than a YAML parse, and the objection to answer is that these
+# files are full of prose *about* `runs-on:`. They are, and one character
+# separates the two: a comment begins with `#`, so anchoring to the start of the
+# line tells them apart completely. Measured on this repository — `ubuntu-24.04`
+# appears in sixteen comments across the three files, and the anchored expression
+# matches none of them and exactly the thirteen real keys. A parser is available
+# rather than out of reach (`/usr/bin/python3` here carries PyYAML 6.0.3) and is
+# still not the cheaper answer: it would make this target depend on a module that
+# is present by accident rather than by declaration, in order to distinguish
+# something a `^` already distinguishes.
+#
+# What makes a grep acceptable is not that it is right today, it is that it
+# refuses when its assumption stops holding. Both checks anchor at exactly four
+# spaces — where a job's own keys sit, one level shallower than a step's — and
+# the first thing the loop does is compare that anchored count against an
+# unanchored one and stop if they differ. A structural check that quietly stops
+# applying is the failure this target exists to prevent, arriving from inside it.
+#
+# Rule 5 is counted rather than attributed, and that is the one place this is
+# weaker than a parser would be: it proves a file declares as many job timeouts
+# as runners, not which job is short. The count is exact — every job that names
+# a runner can carry a timeout, and a job that names no runner can carry
+# neither — so what is lost is the job's name in the message, and a file plus two
+# numbers is close enough to find it.
+audit-policy: ## Check the two hardening rules no linter here covers.
+	@files="$$(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)"; \
+	if [ -z "$$files" ]; then \
+		echo "make: no workflow files found under .github/workflows/." >&2; \
+		echo "      This target discovers its own work, so an empty result is a pass" >&2; \
+		echo "      that asserted nothing rather than a repository with nothing to say." >&2; \
+		exit 1; \
+	fi; \
+	status=0; \
+	while IFS= read -r file; do \
+		loose="$$(grep -cE '^[[:space:]]*runs-on:' "$$file" || true)"; \
+		strict="$$(grep -cE '^    runs-on:' "$$file" || true)"; \
+		if [ "$$loose" != "$$strict" ]; then \
+			echo "make: $$file indents a runs-on key somewhere other than four spaces." >&2; \
+			echo "      Four is where a job's own keys sit, and it is the assumption both" >&2; \
+			echo "      checks here are built on. Refusing rather than reporting a pass" >&2; \
+			echo "      this target cannot stand behind." >&2; \
+			status=1; \
+			continue; \
+		fi; \
+		bad="$$(awk -v want="runs-on: $(RUNNER_IMAGE)" '/^    runs-on:/ { value = $$0; sub(/^ +/, "", value); if (value != want) printf "        %s:%d: %s\n", FILENAME, FNR, value }' "$$file")"; \
+		if [ -n "$$bad" ]; then \
+			echo "make: $$file names a runner this repository does not pin." >&2; \
+			printf '%s\n' "$$bad" >&2; \
+			echo "      Rule 4 at the top of validate.yml: the runner image is pinned like" >&2; \
+			echo "      the rest of the toolchain, at $(RUNNER_IMAGE), because a floating" >&2; \
+			echo "      label moves underneath a repository that pins Terraform to a patch." >&2; \
+			echo "      A job that genuinely needs another image changes RUNNER_IMAGE in" >&2; \
+			echo "      this Makefile, on purpose and in one place." >&2; \
+			status=1; \
+		fi; \
+		timeouts="$$(grep -cE '^    timeout-minutes:' "$$file" || true)"; \
+		if [ "$$strict" != "$$timeouts" ]; then \
+			echo "make: $$file declares $$strict runner(s) and $$timeouts job timeout(s)." >&2; \
+			echo "      Rule 5 at the top of validate.yml: every job carries a" >&2; \
+			echo "      timeout-minutes, because GitHub's default is six hours and the" >&2; \
+			echo "      failure shape here is a hang rather than a crash. The counts are" >&2; \
+			echo "      compared rather than the jobs matched up, so this names the file" >&2; \
+			echo "      and not the job: one missing timeout is one short." >&2; \
+			status=1; \
+		fi; \
+	done <<< "$$files"; \
+	exit $$status
+
+# The five audits `audit` cannot run, on demand, and deliberately never a gate.
+#
+# It is not a stricter `audit`; it is the same tool with a network. Two of the
+# properties that make it useful are the same two that disqualify it from being
+# a required check: it needs a credential, which the required set is kept free
+# of so that bot-authored pull requests can satisfy it, and it can change its
+# answer while this repository does not change, because
+# `known-vulnerable-actions` reports on a database rather than on this tree.
+# Neither belongs in a gate. Both are fine in a command somebody types.
+#
+# When to type it: whenever a `uses:` pin moves. That is the moment
+# `ref-version-mismatch` exists for, and from commit 25 it is Dependabot and the
+# lock-refresh workflow doing the moving rather than a person — at which point
+# this target belongs in that workflow and this comment should say so instead.
+#
+# Two things stand between this target and a pass it has not earned, and they
+# are handled differently on purpose.
+#
+# The token is asserted, because a missing one cannot be constructed away.
+# Finding none, zizmor falls back to offline and says so once at WARN level,
+# which in a scrollback of INFO lines reads like noise: the target would print
+# "No findings to report" having run none of the five audits it exists for.
+#
+# The mode is constructed, because it can be. `ZIZMOR_OFFLINE` and
+# `ZIZMOR_NO_ONLINE_AUDITS` each force offline from the environment, and
+# measured at v1.29.0 either one turns this target into a clean pass on a tree
+# with a deliberately mismatched version comment — a token in hand and nothing
+# looked at. A guard could test for them; unsetting them for the child cannot be
+# got wrong, cannot go stale against whatever the next release reads, and is the
+# same move `audit` above makes by passing `--offline` on the command line,
+# where a flag beats the environment. The wrong state is not detected here, it
+# is unrepresentable.
+audit-online: check-zizmor ## Run zizmor's online audits too. Needs a GitHub token; never a gate.
+	@if [ -z "$${GH_TOKEN:-}$${GITHUB_TOKEN:-}$${ZIZMOR_GITHUB_TOKEN:-}" ]; then \
+		echo "make: audit-online needs a GitHub token and the environment has none." >&2; \
+		echo "      Without one zizmor falls back to offline mode and reports a clean" >&2; \
+		echo "      run having skipped every audit this target exists for." >&2; \
+		echo "" >&2; \
+		echo '        export GH_TOKEN="$$(gh auth token)"    # or a fine-grained PAT' >&2; \
+		echo "" >&2; \
+		echo "      make audit is the offline subset and needs no token." >&2; \
+		exit 1; \
+	fi
+	env -u ZIZMOR_OFFLINE -u ZIZMOR_NO_ONLINE_AUDITS zizmor .
+
 # ---------------------------------------------------------------------------
 # The environment targets
 # ---------------------------------------------------------------------------
 
-# Everything above this line is a check: it reaches no AWS account, needs no
-# credentials, and is safe to make a required status check. Everything below it
-# talks to AWS. They are separated rather than interleaved so that the boundary
-# is visible in the file rather than remembered.
+# Everything above this line is a check and reaches no AWS account; everything
+# below it talks to AWS. All but one of the checks above need no credentials and
+# are safe to make a required status check — `audit-online` is the exception,
+# and it is deliberately neither. They are separated rather than interleaved so
+# that the boundary is visible in the file rather than remembered.
 #
 # One canned recipe, called once per environment per verb, instead of six
 # near-identical bodies. The duplication these replace is not cosmetic: `envs/

@@ -13,8 +13,13 @@
 # so the plan is posted back to the pull request as a comment that is updated
 # in place rather than left in a log somebody has to go and open.
 #
-# Every third-party action is pinned by commit SHA — a tag can be moved, a
-# commit cannot.
+# The hardening rules this file follows — SHA-pinned actions checked for
+# `using: node24`, `permissions: {}` widened per job, `runs-on: ubuntu-24.04`, a
+# `timeout-minutes` on every job and `persist-credentials: false` on every
+# checkout — are stated once and in full at the top of validate.yml, together
+# with which of them the `zizmor` job there actually enforces and which are held
+# by hand. Restating the argument here would be a second copy of it to keep in
+# step.
 
 name: plan
 
@@ -35,10 +40,10 @@ on:
 # that fails on `main` forever. Drift detection on `main` is a different job
 # with a different identity, and it is not this one.
 
-# Least privilege by default. The plan job widens this for itself; nothing else
-# here writes anything.
-permissions:
-  contents: read
+# Nothing by default, granted back one job at a time below. The plan job is the
+# one that widens it, and the `pull-requests: write` it takes is the only grant
+# in this repository that lets a workflow write to the repository at all.
+permissions: {}
 
 # `terraform plan` refreshes state, and refreshing takes the state lock. Two
 # pushes in quick succession would otherwise race for it, and a Terraform
@@ -81,8 +86,8 @@ jobs:
   # exactly what a forgotten path filter would not do.
   detect:
     name: detect
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
@@ -94,6 +99,7 @@ jobs:
           # The merge commit and both its parents, which is all the diff below
           # needs. A full clone would work too and costs more on every run.
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Work out which environments changed
         id: detect
@@ -211,14 +217,22 @@ jobs:
     name: plan (${{ matrix.environment }})
     needs: detect
     if: needs.detect.outputs.environments != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    # Fifteen, as everywhere on the pull-request path, and it sits deliberately
+    # above the `-lock-timeout=5m` the plan below waits with: a run that loses
+    # the race for the state lock reports Terraform's own error and posts it,
+    # rather than being killed at the cap with nothing to say.
+    timeout-minutes: 15
     permissions:
       contents: read
       # The OIDC token exchanged for the plan role.
       id-token: write
-      # The sticky comment. This is the whole reason the workflow-level default
-      # is not enough, and it is granted to this job alone.
+      # The sticky comment below. `pull-requests` rather than `issues`, which is
+      # not obvious from the code: the upsert goes through the issue-comments
+      # endpoint, because a pull request's conversation comments live there —
+      # and that endpoint is covered by this permission when the number belongs
+      # to a pull request, and by `issues: write` only when it belongs to an
+      # issue.
       pull-requests: write
     strategy:
       # One environment failing to plan says nothing about the other, and a
@@ -253,6 +267,8 @@ jobs:
 
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Read the pinned Terraform version
         id: terraform-version
@@ -495,8 +511,8 @@ jobs:
     name: plan-gate
     needs: [detect, plan]
     if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions: {}
     steps:
       - name: Report whether every changed environment planned

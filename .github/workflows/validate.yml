@@ -1,15 +1,112 @@
 # Validation that runs on every pull request.
 #
-# Seven jobs, none of which needs an AWS account, a role or a state bucket: the
+# Eight jobs, none of which needs an AWS account, a role or a state bucket: the
 # Terraform job runs `init -backend=false`, TFLint runs with the AWS ruleset's
 # deep-check rules off, Trivy and terraform-docs read the HCL statically, the
 # module tests configure their providers with credentials that cannot reach AWS,
-# and the other two never touch a cloud provider at all. That is what lets this
+# and the other three never touch a cloud provider at all. That is what lets this
 # gate land before the code it gates, and what keeps it fast enough to be a
 # required check.
 #
-# Every third-party action is pinned by commit SHA — a tag can be moved, a
-# commit cannot.
+# ---------------------------------------------------------------------------
+# The hardening these workflow files share
+# ---------------------------------------------------------------------------
+#
+# Six rules, one policy, applied to every workflow in the repository in a single
+# diff rather than to each as it was written — and stated here in full, because
+# plan.yml and apply.yml follow the same six and should not each carry their own
+# copy of the argument.
+#
+# Who holds which rule, because a green check reads as though it had read the
+# whole list and it has not. Measured against zizmor 1.29.0 and actionlint
+# 1.7.12 rather than assumed:
+#
+#   rules 1, 3, 6   the `zizmor` job below, through `unpinned-uses` (high),
+#                   `excessive-permissions` (medium) and `artipacked` (medium).
+#   rules 4, 5      `make audit-policy`, which the same job runs — two anchored
+#                   greps, because at no persona and in neither mode does zizmor
+#                   say anything about a `runs-on: ubuntu-latest` or about a job
+#                   with no `timeout-minutes`, and actionlint has no rule for
+#                   either.
+#   rule 2          nobody. The node24 check has no tool at all, offline or on,
+#                   and rule 2 says so where it is written.
+#
+# Rule 1 is split, which is the one place this list is finer than it looks. That
+# a `uses:` is pinned at all is zizmor's; that the version comment beside the
+# pin is the tag it claims is `ref-version-mismatch`'s, and that audit does not
+# run offline — so it is `make audit-online`, by hand, when a pin moves.
+#
+# `actionlint` covers none of the six and is not the weaker linter for it: it
+# checks a workflow's syntax, its expressions and, through shellcheck, its `run:`
+# blocks. A mistyped `permissions:` key is its finding and not zizmor's; an
+# over-broad one is zizmor's and not its. The two run in both directions and
+# neither has a timeout rule.
+#
+# Writing the division out is the point rather than a footnote to it. Two more
+# workflows are authored after this commit, and one of them is `e2e.yml` — the
+# highest-privilege file in the repository, holding the apply role, destroying
+# real infrastructure, on a schedule with nobody watching. One rule of the six
+# reaches it through a person reading this list, and the list has to say which.
+#
+# 1. Every `uses:` is a full commit SHA, with the version tag beside it as a
+#    comment. A tag can be moved, a commit cannot. The comment is not
+#    decoration: each SHA here was produced by dereferencing that tag through
+#    the GitHub API rather than copied out of a README, and it is what the next
+#    bump gets read against — including by Dependabot, which from commit 25 is
+#    the thing doing the bumping. One zizmor audit checks that pairing,
+#    `ref-version-mismatch`, and a second, `impostor-commit`, checks the
+#    narrower thing that the SHA belongs to the repository it is written
+#    against at all. Neither runs offline, so neither runs in the job below.
+#    **When a pin moves, run `make audit-online` before the diff leaves the
+#    branch.** The measurement behind that sentence is with the `audit` target
+#    in the Makefile.
+#
+# 2. Every pinned SHA declares `using: node24` in that action's own `action.yml`
+#    at that SHA — checked when the pin is written and again when it is bumped.
+#    A SHA pin freezes the action's JavaScript runtime along with its code, and
+#    Node 20 stopped being the runner default on 16 June 2026 and is removed
+#    from runners on 23 September 2026: a node20-era pin therefore works
+#    perfectly right up to that date and then fails everywhere at once. Nothing
+#    about such a pin is malformed, so neither actionlint nor zizmor has a word
+#    to say about it — one of the three rules held by hand rather than by a
+#    tool, and the only one of them with a deadline. Of the seven actions used
+#    across these files, six are `node24`; `aquasecurity/setup-trivy` is a
+#    composite action and has no JavaScript runtime to pin.
+#
+# 3. `permissions: {}` at workflow level, with the minimum granted per job. An
+#    empty block is not the same as no block: with no block at all every job
+#    inherits the repository's default token permissions, which is a setting
+#    outside this file and can be widened without touching it. Written out, the
+#    default is nothing and every grant below is a line somebody chose to add.
+#
+# 4. `runs-on: ubuntu-24.04`, never `ubuntu-latest`, for the reason Terraform is
+#    pinned to a patch and the provider to a minor. The floating label has
+#    already moved once, from 22.04 to 24.04, and will move again on a schedule
+#    GitHub picks rather than this repository. `ubuntu-22.04` is not the
+#    alternative — it begins brownout on 17 September 2026. The image is a pin
+#    like the toolchain's, and it lives in the same place they do: `RUNNER_IMAGE`
+#    in the Makefile, which `make audit-policy` checks every `runs-on:` in this
+#    directory against. Changing the image is a one-line change there.
+#
+# 5. `timeout-minutes` on every job. GitHub's default is six hours, and the
+#    failure shape in an infrastructure pipeline is a hang rather than a crash:
+#    a state lock waited on indefinitely, a provider waiter that does not
+#    return. Fifteen minutes here and in plan.yml; apply.yml carries larger
+#    numbers and argues them where they sit. They are deliberately loose, and
+#    the looseness is the point — a timeout that fires on a slow success is
+#    worse than no timeout, so what these bound is a wedged runner rather than a
+#    slow one. That every job has one is checked by `make audit-policy`, which
+#    counts rather than matches: it can say a file is one timeout short and not
+#    which job is short of it.
+#
+# 6. Every `checkout` sets `persist-credentials: false`. The action otherwise
+#    writes the job's token into `.git/config`, where every later step of the
+#    job can read it — a `terraform` invocation resolving a module, anything
+#    shipped inside a third-party action, anything that reads the working tree.
+#    Nothing in this repository pushes, so nothing needs it. This is zizmor's
+#    `artipacked` finding — it reported ten, one for every checkout that existed
+#    when it first ran here — and the one rule of the six that came from the
+#    tool rather than from the policy.
 
 name: validate
 
@@ -21,20 +118,23 @@ on:
   push:
     branches: [main]
 
-# Least privilege by default: nothing here writes to the repository.
-permissions:
-  contents: read
+# Nothing by default, granted back one job at a time below. Rule 3 above.
+permissions: {}
 
 jobs:
   # Format and validity of the Terraform sources, driven through the Makefile
   # so that CI and a local shell run the identical commands.
   terraform:
     name: terraform
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Read the pinned Terraform version
         id: terraform-version
@@ -61,11 +161,15 @@ jobs:
   # account, no role and no credentials either.
   tflint:
     name: tflint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Read the pinned TFLint version
         id: tflint-version
@@ -83,8 +187,10 @@ jobs:
         env:
           # `tflint --init` downloads the AWS ruleset from the GitHub API,
           # which is rate-limited to 60 requests an hour for anonymous callers
-          # sharing a runner's IP. The default token lifts that; it is
-          # read-only here, per the top-level `permissions`.
+          # sharing a runner's IP. The default token lifts that, and what it
+          # can do while lifting it is this job's `permissions:` above and
+          # nothing else — the rate limit is raised by the token being
+          # authenticated at all, not by anything it is allowed to reach.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: make lint
 
@@ -101,11 +207,15 @@ jobs:
   # mean the same thing they always did.
   trivy:
     name: trivy
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Read the pinned Trivy version
         id: trivy-version
@@ -140,8 +250,8 @@ jobs:
   # This is a check and not a fix: `make docs-check` fails on drift rather than
   # regenerating and pushing. A job that committed its own correction would
   # report green on work nobody reviewed, and would push to a pull request
-  # branch — which is why `permissions: contents: read` at the top of this file
-  # stays as it is.
+  # branch — which is why this job's grant below stops at `contents: read`, and
+  # why its checkout does not keep the token it arrived with.
   #
   # It is required rather than advisory because the failure it catches is
   # invisible. Stale generated documentation does not break a plan or an apply;
@@ -152,11 +262,15 @@ jobs:
   # hook installed is the one that lands the drift.
   terraform-docs:
     name: terraform-docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Read the pinned terraform-docs version
         id: terraform-docs-version
@@ -213,19 +327,23 @@ jobs:
   # end-to-end run — only by these tests. A check that is advisory on the only
   # coverage a code path has is coverage nobody reads.
   #
-  # No credentials, no OIDC and no `permissions:` beyond the read-only default,
-  # and that is deliberate on both sides. `terraform test` is not credential-free
-  # on its own — the AWS provider validates credentials when it is configured,
-  # before the first assertion — so the test files configure providers that
-  # cannot reach AWS. Giving this job credentials anyway would mask that if it
-  # ever stopped being true.
+  # No credentials, no OIDC, and nothing granted below beyond the `contents:
+  # read` its checkout needs — deliberate on both sides. `terraform test` is not
+  # credential-free on its own: the AWS provider validates credentials when it
+  # is configured, before the first assertion, so the test files configure
+  # providers that cannot reach AWS. Giving this job credentials anyway would
+  # mask that if it ever stopped being true.
   terraform-test:
     name: terraform-test
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Read the pinned Terraform version
         id: terraform-version
@@ -244,16 +362,28 @@ jobs:
         run: make test
 
   # Workflow syntax, expression errors and — through shellcheck — bugs in the
-  # `run:` blocks above. This is what keeps the hardening of these workflows
-  # true over time: a typo in a `permissions:` key is otherwise ignored in
-  # silence by GitHub.
+  # `run:` blocks above: a mistyped `permissions:` key is otherwise ignored in
+  # silence by GitHub, which is to say it grants what it was written to
+  # withhold.
+  #
+  # It holds none of the six rules at the top of this file, which is worth saying
+  # rather than leaving to be discovered: this job and the `zizmor` job below run
+  # past each other in both directions. actionlint reads a `permissions:` key and
+  # says whether it is a key; zizmor reads the block and says whether it is wider
+  # than the job. A workflow with a floating `runs-on` and no `timeout-minutes`
+  # is clean to both, which is what `make audit-policy` is for. Three checks, no
+  # overlap, and the list of which holds what is at the top of the file.
   actionlint:
     name: actionlint
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Lint the workflows
         env:
@@ -265,6 +395,72 @@ jobs:
           docker run --rm --entrypoint shellcheck "$ACTIONLINT_IMAGE" --version
           docker run --rm -v "$PWD:/repo:ro" --workdir /repo "$ACTIONLINT_IMAGE" -color -verbose
 
+  # The hardening at the top of this file, checked rather than remembered — the
+  # three rules zizmor has an audit for, and through `make audit`'s
+  # `audit-policy` prerequisite the two it does not. The job's name is `zizmor`
+  # because that string is a required status check in the branch ruleset and
+  # renaming it would silently stop satisfying one; the target is what says what
+  # actually ran.
+  #
+  # Installed and invoked exactly as Trivy and terraform-docs are: the Makefile
+  # holds the pin, this job reads it back, and the check is `make audit` rather
+  # than a second copy of the invocation written in YAML. The obvious
+  # alternative, zizmorcore/zizmor-action, loses on the argument that already
+  # ruled out trivy-action and terraform-docs/gh-actions — it takes the flags as
+  # `with:` inputs, so the hook in .pre-commit-config.yaml could not run the
+  # same command as this job, and its SARIF upload asks for
+  # `security-events: write` to publish a report nothing here reads.
+  #
+  # No token, and that is not an omission this job would survive by accident:
+  # zizmor selects offline or online mode from whether one is in the
+  # environment, and the mode moves the verdict. `make audit` passes `--offline`
+  # so that the presence of a token changes nothing, here or in a contributor's
+  # shell. The measurement behind that is with the target in the Makefile.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned zizmor version
+        id: zizmor-version
+        # As with TFLint, Trivy and terraform-docs: the Makefile is the pin, and
+        # `check-zizmor` demands this exact version of whatever the step below
+        # installs, so the two cannot drift without the target saying so.
+        run: echo "version=$(make -s print-zizmor-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install zizmor
+        env:
+          VERSION: ${{ steps.zizmor-version.outputs.version }}
+        # No action for this one, and — unlike the terraform-docs job above — no
+        # checksum file to verify against: the release publishes five archives
+        # and nothing beside them. Less is lost there than it looks. That
+        # checksum detects a truncated or corrupted download rather than a
+        # compromised release, the release tag being what fixes the contents in
+        # both cases; a truncated gzip stream fails in `tar` here anyway, and a
+        # binary that is not the pinned one fails in `check-zizmor` one step
+        # later.
+        #
+        # The archive holds the binary alone. Its directory goes on PATH rather
+        # than into a system one, so no step here needs to be root.
+        run: |
+          workdir="$(mktemp -d)"
+          archive="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "${workdir}/${archive}" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${VERSION}/${archive}"
+          tar -xzf "${workdir}/${archive}" -C "${workdir}" zizmor
+          echo "${workdir}" >> "$GITHUB_PATH"
+
+      - name: Audit the workflows
+        run: make audit
+
   # The pull request title becomes the subject of the squashed commit, so it is
   # checked with the same rigour as the code. Skipped on push, where there is
   # no pull request to read a title from; main only ever receives commits
@@ -272,8 +468,13 @@ jobs:
   pr-title:
     name: pr-title
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job here that checks nothing out and calls no API: the title it
+    # reads arrives in the event payload, which is not a resource a token grants
+    # access to. So it keeps the workflow-level nothing, and a `contents: read`
+    # added here out of symmetry would be a grant with no reader.
+    permissions: {}
     steps:
       - name: Check the title against Conventional Commits
         env:

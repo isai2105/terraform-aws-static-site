@@ -25,9 +25,12 @@
 # that reads as an oversight if the argument is not sitting next to it.
 #
 # The gate set mirrored here is the one that exists at this commit: terraform
-# fmt and validate, the module tests, tflint, trivy, terraform-docs and
-# actionlint. `zizmor` joins validate.yml later and joins this file in the same
-# commit, rather than being left to drift in behind it.
+# fmt and validate, the module tests, tflint, trivy, terraform-docs, actionlint
+# and zizmor. The last of those is the promise this paragraph used to make in
+# the future tense, and it was kept in the shape it was made: zizmor joined
+# validate.yml and joined this file in one commit, so there has never been a
+# version of the repository whose workflow hardening was enforced by a check
+# this file did not also run.
 
 repos:
   # -------------------------------------------------------------------------
@@ -251,6 +254,53 @@ repos:
         # run reads as the list of validate.yml job names it mirrors. The id is
         # still what selects it: `pre-commit run actionlint-docker`.
         name: actionlint
+
+  # -------------------------------------------------------------------------
+  # zizmor — the workflow hardening, through the Makefile like the six above.
+  # -------------------------------------------------------------------------
+  #
+  # `repo: local` rather than the upstream zizmorcore/zizmor hooks file, and the
+  # choice is the Makefile argument from the top of this file rather than a
+  # preference. A `rev:` there would be a second pin, in the one file that
+  # cannot read `ZIZMOR_VERSION`, and `pre-commit autoupdate` would move it
+  # without touching validate.yml — exactly the drift `print-zizmor-version`
+  # exists to make impossible. It would also run zizmor's own default
+  # invocation rather than the one `make audit` owns, and the flag that differs
+  # is `--offline`: without it the hook's verdict depends on whether the shell
+  # running it has a GitHub token exported, which is the silent local-versus-CI
+  # divergence this file exists to rule out.
+  #
+  # So this is the actionlint gap above, closed rather than accepted — closed
+  # here because here it can be. There is a target to call, and no shellcheck to
+  # carry into the sandbox with the binary.
+  #
+  # The trigger is written against what the target *collects*, not against where
+  # those files happen to live today — the rule the `terraform test` hook above
+  # arrived at, and for the same reason. `zizmor .` collects workflows, the
+  # Dependabot configuration, composite action definitions from anywhere in the
+  # tree, and both pre-commit files in either spelling; the middle one is
+  # measured rather than assumed, and it is why `action.yml` is matched at any
+  # depth instead of only under `.github/`.
+  #
+  # None of those extra files exists here, and matching them anyway is the whole
+  # point of the rule: the `action.yml` added outside `.github/` next year is
+  # exactly the one a trigger scoped to today's layout would send to GitHub
+  # unchecked. Applying that consistently is cheaper than deciding case by case
+  # which absent file is likely enough to be worth an alternation.
+  #
+  # This file is one of the triggers too, which is not a formality: zizmor reads
+  # it as an input in its own right, so a change here is a change to something
+  # `make audit` looks at. The Makefile is a trigger because it holds the pins
+  # `make audit` runs with — the zizmor version, and the runner image
+  # `audit-policy` checks every `runs-on:` against.
+  - repo: local
+    hooks:
+      - id: zizmor
+        name: zizmor
+        entry: make audit
+        language: system
+        pass_filenames: false
+        files: ^\.github/.*\.ya?ml$|(^|/)action\.ya?ml$|^\.pre-commit-(config|hooks)\.ya?ml$|^Makefile$
 
   # -------------------------------------------------------------------------
   # gitleaks — offered, not required.
