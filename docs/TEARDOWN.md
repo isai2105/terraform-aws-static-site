@@ -38,7 +38,7 @@ Three layers, and they come down in this order:
 | # | Layer | Why it is here |
 |---|---|---|
 | 1 | **Every environment** — `envs/stage`, `envs/prod` | They hold everything that costs money and everything that can be orphaned |
-| 2 | **Anything the app repository owns** | It must not be re-creating what step 1 just removed, and from build-plan commits 27–28 it holds identities and parameters pointing at the environment |
+| 2 | **Anything the app repository owns** | It must not be re-creating what step 1 just removed, and it will hold identities and parameters pointing at the environment as soon as the `static-site` module creates them |
 | 3 | **The bootstrap** — state bucket and OIDC provider | It is the only thing that knows how to remove the other two |
 
 **The environments are independent of each other.** Stage and prod have separate state keys and
@@ -47,9 +47,9 @@ effect on the other and the order between them does not matter. Destroy them in 
 at the same time.
 
 **Layer 2 is almost empty at this commit, and it is stated anyway.** The `static-site` module
-creates no artefacts owned by the app repository yet — that arrives with the SSM parameters and
-the scoped deploy role in build-plan commits 27 and 28, and both are module resources that will
-be destroyed with the environment that holds them. What already crosses the repository boundary
+creates no artefacts owned by the app repository yet — that arrives when the module gains the
+SSM parameters and the scoped deploy role, and both are module resources that will be destroyed
+with the environment that holds them. What already crosses the repository boundary
 today is the content the app deploys into the site bucket, and that is handled by
 `force_destroy = true`: an object Terraform did not manage was planted deliberately during
 verification and was removed by the destroy on both runs it was tried on. The rule that outlives

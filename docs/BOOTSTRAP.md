@@ -13,13 +13,12 @@ This document is written for a stranger with an empty AWS account. Follow it top
 
 > **This runbook has not been walked end to end.** Nothing in this repository has been applied
 > against a real AWS account yet, so the procedure below is derived from the configuration
-> rather than from a run that produced it. Step 6.1 of the build plan is where the from-zero
-> path — empty account, fresh clone, bootstrap, apply, verify, destroy, and the bootstrap
-> teardown itself — gets walked and dated in the README. Until that date is there, treat the
-> AWS-side steps as reviewed but unexecuted, and expect the apply role's policy in particular
-> to be missing an action or two: it was derived service by service from what this repository
-> creates, and its intended failure mode is a named `AccessDenied` rather than a wildcard that
-> never fails.
+> rather than from a run that produced it. The from-zero path — empty account, fresh clone,
+> bootstrap, apply, verify, destroy, and the bootstrap teardown itself — will be walked in one
+> pass and dated in the README. Until that date is there, treat the AWS-side steps as reviewed
+> but unexecuted, and expect the apply role's policy in particular to be missing an action or
+> two: it was derived service by service from what this repository creates, and its intended
+> failure mode is a named `AccessDenied` rather than a wildcard that never fails.
 
 ## Why there are no values in this runbook
 
@@ -617,7 +616,7 @@ rename or delete the label and nothing objects, the repository stays green for a
 teardowns keep working, and the run that discovers the label is gone is the run that needed the
 issue.
 
-## 8. A token for the scheduled provider-lock refresh *(needed from build-plan commit 25)*
+## 8. A token for the scheduled provider-lock refresh *(not needed until that workflow exists)*
 
 Not required to bootstrap; required before the provider-lock refresh workflow is any use, and
 it belongs here with the rest of the platform setup.
