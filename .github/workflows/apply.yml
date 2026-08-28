@@ -45,12 +45,20 @@ on:
   workflow_dispatch:
     inputs:
       # `choice`, not `string`, and the reason is specific rather than tidiness.
-      # GitHub environment names are case-insensitive and are created
-      # implicitly: `Prod` would clear the prod gate and then fail at STS,
-      # which names nothing, while `prd` would silently create a brand new
-      # environment with no protection rules at all and deploy through it. A
-      # free-text box makes both of those one keystroke away. A closed list
-      # makes them unreachable.
+      # GitHub creates an environment implicitly the first time a job names
+      # one, with no protection rules at all, so a free-text box makes `prd` a
+      # single keystroke away from an environment that looks configured because
+      # it now exists. That one stops at `AssumeRoleWithWebIdentity` — the
+      # apply role's trust names `stage` and `prod` and nothing else — so what
+      # it costs is a confusing failure and a stray environment somebody has to
+      # notice and delete, rather than an unreviewed deploy.
+      #
+      # `Prod` is the one that is genuinely unclear. Environment names are
+      # matched case-insensitively for uniqueness, but which spelling GitHub
+      # then puts in the `sub` claim when the reference and the stored name
+      # differ in case is not something this repository has measured, and the
+      # rest of it is careful to say when a claim was read out of a real token.
+      # A closed list is what makes the question not need an answer.
       #
       # The two options are a contract with three things outside this file: the
       # directories under envs/, the `environments` list in
@@ -66,7 +74,6 @@ on:
           - stage
           - prod
         default: stage
-        required: true
 
       # A `choice` input always arrives with one option preselected — there is
       # no unset state to force a decision — so the preselected one is stated
@@ -79,7 +86,6 @@ on:
           - apply
           - destroy
         default: apply
-        required: true
 
 # Least privilege by default. Both jobs widen this for themselves by exactly
 # one permission, and nothing here writes to the repository.
@@ -91,6 +97,16 @@ permissions:
 # once would fight over the state lock at best and interleave two applies at
 # worst; a run applying `stage` while another applies `prod` is two unrelated
 # operations and should not queue.
+#
+# It serialises this workflow against itself and nothing more. plan.yml groups
+# on `plan-${github.ref}`, so a pull request planning `stage` can run beside an
+# apply of `stage`, and the two meet at the state lock rather than here — where
+# the apply wins, because it holds the lock through resource creation and
+# plan.yml waits five minutes for it. A pull-request plan going red against a
+# running apply is therefore expected rather than a fault, and re-running it
+# afterwards is the answer. Merging the two groups would fix that at the price
+# of a pull-request plan being able to make a dispatch wait, which is the wrong
+# way round.
 #
 # `cancel-in-progress: false` for a stronger reason here than in plan.yml.
 # Cancelling a plan strands a lock; cancelling an *apply* strands a lock and
@@ -154,6 +170,7 @@ jobs:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_APPLY_ROLE_ARN: ${{ vars.AWS_APPLY_ROLE_ARN }}
+        shell: bash
         run: |
           missing=()
           for name in TF_STATE_BUCKET AWS_REGION AWS_APPLY_ROLE_ARN; do
@@ -252,7 +269,8 @@ jobs:
             -backend-config="bucket=${TF_STATE_BUCKET}" \
             -backend-config="key=${ENVIRONMENT}/terraform.tfstate" \
             -backend-config="region=${TF_STATE_REGION}" \
-            -backend-config="use_lockfile=true"
+            -backend-config="use_lockfile=true" \
+            2>&1 | tee "${RUNNER_TEMP}/init.log"
 
       # `-out` is the whole mechanism: it is what makes the apply below apply a
       # reviewed artefact instead of a fresh opinion. The file is named
@@ -267,6 +285,7 @@ jobs:
       # approved again. Waiting is cheaper than spending a human's attention
       # twice.
       - name: Plan
+        id: plan
         shell: bash
         env:
           ENVIRONMENT: ${{ inputs.environment }}
@@ -294,15 +313,18 @@ jobs:
       # other way to obtain this file, and applying anything else would defeat
       # the split.
       #
-      # `retention-days: 1` because of what a binary plan is and where this one
+      # `retention-days: 1` because of what a plan file is and where this one
       # is published. On a public repository the Actions artifacts REST
-      # endpoint is readable without authentication, and a binary plan carries
-      # every attribute of every resource in it fully resolved — including
-      # anything a configuration marked `sensitive`, which the format does not
-      # redact. Nothing in this repository is marked sensitive and no secret
-      # value appears in these plans, which is what makes an unauthenticated
-      # reader acceptable here and would not make it acceptable elsewhere: a
-      # repository whose plans resolve a secret has to encrypt the artefact
+      # endpoint is readable without authentication, and a plan file is a zip
+      # whose members are the plan, the configuration snapshot and — this is
+      # the part worth being exact about — `tfstate` and `tfstate-prev`, the
+      # prior state verbatim. So it exposes every attribute of every resource
+      # the environment already has, not only the ones the plan touches, with
+      # anything marked `sensitive` resolved: the format does not redact.
+      # Nothing in this repository is marked sensitive and no secret value
+      # reaches this state, which is what makes an unauthenticated reader
+      # acceptable here and would not make it acceptable elsewhere — a
+      # repository whose state holds a secret has to encrypt the artefact
       # before uploading it. Gitignoring plan files and then publishing them
       # through a more open channel would be the same mistake made twice.
       #
@@ -322,12 +344,24 @@ jobs:
       - name: Upload the plan
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: terraform-plan-${{ inputs.environment }}-${{ inputs.action }}-${{ github.run_id }}
+          # `run_attempt`, not just `run_id`. An artefact name has to be unique
+          # within a run, and `run_id` is constant across attempts — so "Re-run
+          # all jobs" would re-upload under a name attempt one already took and
+          # fail on a 409 before ever reaching the apply. The run id stays
+          # because the artefact outlives the page it was downloaded from and
+          # should say which run produced it.
+          #
+          # The other half of the same coin: re-running the apply job alone
+          # looks for an artefact this attempt never uploaded, and would fail
+          # even if it found one, because a plan whose apply already started is
+          # stale. A failed apply is re-dispatched, not partially re-run.
+          name: terraform-plan-${{ inputs.environment }}-${{ inputs.action }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: envs/${{ inputs.environment }}/terraform.tfplan
           retention-days: 1
-          # The default is a warning, which would produce an empty artefact and
-          # move the failure to the download step in the next job — after the
-          # prod reviewer has approved it.
+          # The default logs a warning and uploads nothing at all, which moves
+          # the failure to the download step in the next job — after the prod
+          # reviewer has approved it, and reported as a missing artefact rather
+          # than as a plan that was never written.
           if-no-files-found: error
 
       - name: Record when the plan was published
@@ -335,7 +369,8 @@ jobs:
         shell: bash
         run: echo "epoch=$(date -u +%s)" >> "$GITHUB_OUTPUT"
 
-      # The plan, on the run's own summary page.
+      # The plan — or, when there is no plan, whatever stopped there being one
+      # — on the run's own summary page.
       #
       # This is the same argument plan.yml makes for its sticky comment, in the
       # place this workflow has instead of a pull request: GitHub's "Review
@@ -345,14 +380,20 @@ jobs:
       # approval that is inconvenient to inform is an approval that gets given
       # uninformed.
       #
-      # No `if: always()`. A failed plan produces nothing to approve — the
-      # apply job never starts — and the person who dispatched the run is
-      # already watching it.
+      # `if: always()`, and for the reason plan.yml gives rather than for
+      # symmetry. The likeliest failure in this job is not the plan, it is
+      # `init` — an unset repository variable, a state key the role is not
+      # granted, an AssumeRole that was refused — and on prod that failure
+      # happens *after* somebody approved the job. A summary that appears only
+      # when everything worked is missing on exactly the runs that need
+      # explaining.
       - name: Publish the plan to the run summary
+        if: always()
         shell: bash
         env:
           ENVIRONMENT: ${{ inputs.environment }}
           ACTION: ${{ inputs.action }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
         run: |
           # A step summary is capped at 1 MiB and is dropped wholesale when it
           # is exceeded, so the budget leaves room for the markdown wrapped
@@ -360,12 +401,20 @@ jobs:
           # prints its verdict last. `iconv -c` drops the partial character
           # `tail -c` can leave at the cut.
           budget=900000
-          log="${RUNNER_TEMP}/plan.log"
 
-          # Terraform's own one-line verdict, which is the line a reviewer
-          # reads first. Quoted rather than reconstructed.
-          headline="$(grep -m 1 -E '^(Plan: |No changes\.)' "$log" || true)"
-          : "${headline:=The plan succeeded.}"
+          # The plan log when a plan ran, the init log otherwise. Which file
+          # exists is also how far the job got, and that is read from the files
+          # rather than from `steps.plan.outcome`: a step that never ran because
+          # an earlier one failed is absent from the `steps` context entirely,
+          # so its outcome is the empty string rather than "skipped", and an arm
+          # written for "skipped" would never fire.
+          if [ -s "${RUNNER_TEMP}/plan.log" ]; then
+            log="${RUNNER_TEMP}/plan.log"
+          elif [ -s "${RUNNER_TEMP}/init.log" ]; then
+            log="${RUNNER_TEMP}/init.log"
+          else
+            log=""
+          fi
 
           # As in plan.yml: markdown wants backticks and a shell reads one as
           # command substitution, so they are composed from an escape rather
@@ -374,15 +423,36 @@ jobs:
           tick="$(printf '\140')"
           fence="${tick}${tick}${tick}${tick}"
 
+          if [ "$PLAN_OUTCOME" = success ]; then
+            # Terraform's own one-line verdict, which is the line a reviewer
+            # reads first. Quoted rather than reconstructed.
+            headline="$(grep -m 1 -E '^(Plan: |No changes\.)' "$log" || true)"
+            : "${headline:=The plan succeeded.}"
+            preamble="This is the plan the apply job will apply, as a saved"
+            preamble="${preamble} plan: nothing is recomputed after this point."
+          elif [ "$log" = "${RUNNER_TEMP}/plan.log" ]; then
+            headline="**The plan failed, so there is nothing to approve.**"
+            preamble=""
+          elif [ -n "$log" ]; then
+            headline="**${tick}terraform init${tick} failed, so no plan was produced.**"
+            preamble=""
+          else
+            headline="**The job failed before Terraform ran.**"
+            preamble=""
+          fi
+
           {
             printf '### Terraform %s: %s%s%s\n\n' \
               "$ACTION" "$tick" "$ENVIRONMENT" "$tick"
             printf '%s\n\n' "$headline"
-            printf 'This is the plan the apply job will apply, as a saved plan:\n'
-            printf 'nothing is recomputed after this point.\n\n'
+            if [ -n "$preamble" ]; then
+              printf '%s\n\n' "$preamble"
+            fi
             printf '<details><summary>Show Terraform output</summary>\n\n'
             printf '%sterraform\n' "$fence"
-            if [ "$(wc -c < "$log")" -gt "$budget" ]; then
+            if [ ! -s "$log" ]; then
+              printf 'No Terraform output was captured. See the run log.\n'
+            elif [ "$(wc -c < "$log")" -gt "$budget" ]; then
               printf '[truncated to the last %s characters; the full output is in the run log]\n\n' "$budget"
               tail -c "$budget" "$log" | iconv -c -f UTF-8 -t UTF-8
             else
@@ -480,14 +550,19 @@ jobs:
       # The configuration this apply runs is not the one in that directory: a
       # plan file carries its own snapshot of the configuration it was taken
       # from, and `terraform apply <plan>` uses that snapshot rather than the
-      # working tree. So the artefact really is the unit of review — what the
-      # reviewer approved is what runs, in full, and an edited checkout could
-      # not change it even if there were one. The checkout is still needed, for
-      # the backend block `init` reads and for .terraform-version.
+      # working tree. So the artefact is the unit of review for the change
+      # itself — an edited checkout could not alter what the reviewer approved.
+      #
+      # What the snapshot does not cover is where the state comes from: that is
+      # the backend block in the checkout plus the `-backend-config` values
+      # below, both read at this ref. Both jobs check out the same commit of
+      # the same run, so they cannot disagree within a run; the claim is
+      # "nothing between the plan and the apply can change either", not "the
+      # plan file decides both".
       - name: Download the plan
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: terraform-plan-${{ inputs.environment }}-${{ inputs.action }}-${{ github.run_id }}
+          name: terraform-plan-${{ inputs.environment }}-${{ inputs.action }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: envs/${{ inputs.environment }}
 
       - name: Read the pinned Terraform version
