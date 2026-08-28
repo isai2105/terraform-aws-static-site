@@ -29,8 +29,8 @@ that matters; the bucket name carries a `random_id` suffix that is re-minted on 
 cycle, so a recorded literal is stale within the hour; and this file is committed to a public
 repository, where a pasted account id is the likeliest leak in the whole project.
 
-Placeholders below — `<owner>`, `<repo>`, `<account-id>`, `<env>`, `<name_prefix>` — are yours
-to substitute.
+Placeholders below are written in `<angle brackets>` — `<owner>`, `<repo>`, `<account-id>`,
+`<env>` and the rest — and every one of them is yours to substitute.
 
 ---
 
@@ -80,7 +80,7 @@ can be removed with claim customisation.
 `name_prefix` becomes part of a globally unique S3 bucket name, so pick something a stranger is
 unlikely to have taken. `environments` is the list of environment names this repository
 deploys; it drives the state keys, the apply role's trusted-subject list, and the GitHub
-Environments you create at build-plan step 4.2.
+Environments you create in section 7.4.
 
 Nothing in this file is sensitive, which is why it is committed at all. Keep it that way: no
 account id, no ARN, no token.
@@ -151,8 +151,9 @@ backend configuration, and a fresh clone is unrunnable.
 
 ## 7. Configure the GitHub repository
 
-Branch protection here is a reproducible API call, not something someone once clicked. Applied
-against `main` from the first push onward.
+Protection here is a reproducible API call, not something someone once clicked — the ruleset on
+`main` from the first push onward, and the deployment gates the apply workflow authenticates
+through.
 
 ### 7.1 The ruleset
 
@@ -189,7 +190,10 @@ gh api --method POST /repos/<owner>/<repo>/rulesets --input - <<'JSON'
           { "context": "tflint" },
           { "context": "trivy" },
           { "context": "actionlint" },
-          { "context": "pr-title" }
+          { "context": "pr-title" },
+          { "context": "terraform-docs" },
+          { "context": "terraform-test" },
+          { "context": "plan-gate" }
         ]
       }
     }
@@ -198,12 +202,20 @@ gh api --method POST /repos/<owner>/<repo>/rulesets --input - <<'JSON'
 JSON
 ```
 
-**This is the shape, not a frozen final answer.** The required-check list grows once per gate
-through Phases 2 to 4 — the module docs check, the module tests, the plan gate, the
-workflow-policy check — and each of those steps re-issues this call with its own context added,
-in the same step that introduces the check. A check that is not added to the ruleset when it
-lands is a check that stays advisory until somebody notices. Update the ruleset in place with
-`--method PUT /repos/<owner>/<repo>/rulesets/<id>` rather than creating a second one.
+**Those eight are the current set, and cloners should paste all eight.** Every one of them is
+reported by a workflow in this repository today, so a ruleset carrying fewer is a gate that
+silently is not there — drop `plan-gate` in particular and pull requests merge with no Terraform
+plan gate at all, which is the omission that costs something rather than the one that shows up
+as a missing badge.
+
+**It is not a frozen final answer either.** The list grew one context per gate through Phases 2
+to 4: the first five above are the set that exists when this runbook first runs in plan order,
+and `terraform-docs`, `terraform-test` and `plan-gate` each arrive with the step that introduces
+the check, which re-issues this call with its own context added. Anyone building the repository in
+that order adds them as they land rather than up front, and the next gate does the same. A check
+that is not added to the ruleset when it lands is a check that stays advisory until somebody
+notices. Update the ruleset in place with `--method PUT /repos/<owner>/<repo>/rulesets/<id>`
+rather than creating a second one.
 
 `strict_required_status_checks_policy` is `false` deliberately: requiring branches to be
 up to date with `main` before merging forces a rebase and a full re-run of every check on every
@@ -262,6 +274,186 @@ the Conventional Commits check in `validate.yml` actually validated:
 gh api /repos/<owner>/<repo> --jq '{squash_merge_commit_title, squash_merge_commit_message}'
 # expect: PR_TITLE / PR_BODY
 ```
+
+### 7.4 The two GitHub Environments
+
+`stage` and `prod` are not decoration on the apply jobs. The apply role is trusted on the
+`environment:<env>` subject and on no ref at all — the claim, and why it *replaces* the ref
+rather than joining it, are in "What a cloner needs to know" below — so a job that does not name
+an environment cannot assume the role at all. What that does **not** buy is any assurance the
+environment was ever configured, and the failure runs the wrong way round:
+
+**Create both before any workflow names one.** GitHub creates an environment implicitly the
+first time a job references it, with **no protection rules at all**. Reach a `prod` dispatch
+first and the environment is auto-created unprotected: no reviewer, no branch restriction, the
+apply runs ungated — and the Actions UI then shows a `prod` environment that looks configured
+because it exists.
+
+One limit before the calls, because it is not recoverable by editing the payload: environments
+are configurable on a public repository under every plan, but on a **private** one only under
+GitHub Pro, Team or Enterprise. A private clone on Free gets no reviewer and no branch policy,
+and the apply role's `environment:` trust then gates nothing on its own.
+
+`stage` is deliberately self-service. A reviewer requirement whose only reviewer is the person
+dispatching records an approval that means nothing — which is section 7.2's conclusion about
+required pull request approvals, reached from the opposite direction: there the single maintainer
+*cannot* approve their own work, here they always can.
+
+```bash
+gh api --method PUT /repos/<owner>/<repo>/environments/stage --input - <<'JSON'
+{
+  "wait_timer": 0,
+  "prevent_self_review": false,
+  "reviewers": [],
+  "deployment_branch_policy": {
+    "protected_branches": false,
+    "custom_branch_policies": true
+  },
+  "can_admins_bypass": false
+}
+JSON
+```
+
+`prevent_self_review` does nothing on an environment with no reviewer, and `wait_timer` is inert
+here because it is `0` rather than because there is no reviewer — it delays any job that names
+the environment. Both are sent anyway, because a five-field body is the only shape that stays
+correct the next time one of these is edited: see the full-replace note below.
+
+`prod` adds a required reviewer. The array takes numeric ids, not logins, and `<reviewer-id>` is
+the account that will do the approving — `gh api /users/<login> --jq .id`. Under a personal
+account that is the same id section 2 read for the OIDC subject; under an organisation it is not,
+and a team can be named instead with `"type": "Team"` and the team's id.
+
+```bash
+gh api --method PUT /repos/<owner>/<repo>/environments/prod --input - <<'JSON'
+{
+  "wait_timer": 0,
+  "prevent_self_review": false,
+  "reviewers": [ { "type": "User", "id": <reviewer-id> } ],
+  "deployment_branch_policy": {
+    "protected_branches": false,
+    "custom_branch_policies": true
+  },
+  "can_admins_bypass": false
+}
+JSON
+```
+
+`prevent_self_review` is `false` on `prod`, and that is the correct value here rather than a
+compromise. With one maintainer — who is also the person dispatching `apply.yml` — `true` means
+the only account that can approve a deployment is the account forbidden from approving it, and
+prod becomes permanently unapprovable. It is the sibling of section 7.2's review count and flips
+at the same moment: the day a second maintainer exists, set it `true` and raise the count
+together.
+
+`can_admins_bypass` is `false` on both. Left at its default of `true`, a repository
+administrator can push a pending deployment past the reviewer gate at run time, and this
+repository has exactly one administrator — the same person who dispatches the workflow. The
+gate would then record an approval its approver could always skip.
+
+**The named branch policy is a second call.** The PUT above only declares that this environment
+*uses* custom branch policies — it declares the mode, not the list, and creates no policy at
+all. Until the POST below runs, both environments carry a policy list that matches nothing:
+
+```bash
+for env in stage prod; do
+  gh api --method POST \
+    /repos/<owner>/<repo>/environments/"$env"/deployment-branch-policies \
+    -f name=main -f type=branch
+done
+```
+
+**`protected_branches: true` is the wrong mechanism here, and it is the trap in this
+subsection.** It looks like the simpler option — restrict deployments to protected branches, done
+— but the REST reference defines it as "whether only branches with **branch protection rules**
+can deploy to this environment", and section 7.1 protects `main` with a **ruleset**, which is a
+different system. The two disagree in the API, and this is worth seeing once:
+
+```bash
+gh api /repos/<owner>/<repo>/branches/main --jq '{protected}'
+# {"protected":true}
+
+gh api /repos/<owner>/<repo>/branches/main/protection
+# {"message":"Branch not protected", ...} on stdout, then
+# gh: Branch not protected (HTTP 404) on stderr, and a non-zero exit
+```
+
+Both answers are correct about their own system. Which of them the deployment gate consults is
+not a question this repository can settle from outside, and a wrong answer is silent — the
+policy exists, the UI shows a restriction, and every branch deploys. The named `main` policy
+does not depend on the answer, so use it and leave `protected_branches` at `false`.
+
+**Treat the PUT as a full replace, and resend all five fields on every later edit.** A PUT that
+replaces the resource drops what it omits, so a four-field body — the natural one to send, since
+four fields is the documented schema — would take `can_admins_bypass` back to its `true` default,
+and a body without `deployment_branch_policy` would take the branch restriction with it. Both
+would return HTTP 200 and leave an environment that still exists and still looks configured.
+
+**That reading is inferred rather than measured, and the doubt is worth stating.** The REST
+reference lists exactly `wait_timer`, `prevent_self_review`, `reviewers` and
+`deployment_branch_policy` — `can_admins_bypass` is not in the PUT body schema at all (checked
+against docs.github.com's environments reference, 2026-08-28) — and it says nothing either way
+about what happens to a field left out. No partial PUT has been tried here to settle it. What
+*is* observed is that the undocumented field is accepted and takes effect on the way in: both
+environments read back `false` after exactly the payloads above. So resend all five, which costs
+nothing, and let the check below be the thing you trust.
+
+Verify after creating them, and after any later edit:
+
+```bash
+for env in stage prod; do
+  echo "$env"
+  gh api /repos/<owner>/<repo>/environments/"$env" \
+    --jq '{can_admins_bypass, rules: [.protection_rules[].type]}'
+  gh api /repos/<owner>/<repo>/environments/"$env"/deployment-branch-policies \
+    --jq '[.branch_policies[].name]'
+done
+```
+
+which prints, on a repository configured as above:
+
+```
+stage
+{"can_admins_bypass":false,"rules":["branch_policy"]}
+["main"]
+prod
+{"can_admins_bypass":false,"rules":["required_reviewers","branch_policy"]}
+["main"]
+```
+
+Two ways this can disagree, both fixable in place. A `can_admins_bypass` of `true` means the
+undocumented field did not take: clear it from the environment's settings page — **Allow
+administrators to bypass configured protection rules** — and re-run the check. An empty `[]`
+means the named policy was never created or did not survive an edit: re-run the POST above. It
+cannot duplicate one — the reference documents a 303 for a branch name pattern that already
+exists — though what `gh` prints for that response has not been checked here.
+
+**Expect a prod dispatch to cost two approvals, not one.** Both jobs in `apply.yml` name the
+environment — the plan job has to, because from a dispatch the apply role is the only credential
+that reaches prod state, and it is trusted on the `environment:` subject alone — and every job
+that names an environment creates its own deployment against it. Two deployments per dispatch is
+measured: a `stage` destroy produced one per job, and the header comment in
+`.github/workflows/apply.yml` names that run and both deployment ids. That prod therefore asks
+the reviewer twice — once to take the plan, once to apply it, and only the second request has a
+plan to read — follows from each of those two deployments having to clear prod's gate, and has
+not been watched happen: nothing has been dispatched against `prod` yet. Worth knowing before the
+second prompt arrives looking like a stuck run.
+
+**The environment names are a verbatim contract.** The same two strings are `environments` in
+`bootstrap/terraform.tfvars`, the `:environment:<env>` subjects in the apply role's trust policy,
+and the `<env>/terraform.tfstate` state keys. The two halves break in opposite directions, which
+is the reason to spell it out: change the name in `bootstrap/terraform.tfvars` alone and the next
+dispatch is refused at `AssumeRoleWithWebIdentity`, loudly, from a workflow that reads as
+correct. Rename or delete the GitHub Environment alone and nothing is refused at all —
+`apply.yml` still names the old string, GitHub re-creates it on reference with no protection
+rules, the OIDC subject is unchanged, and the apply runs ungated. The loud failure is the safe
+one.
+
+**A default-branch rename breaks both environments.** The ruleset in section 7.1 survives one,
+because it matches `~DEFAULT_BRANCH` rather than a name; these policies do not, because `main` is
+written into each of them literally. Every dispatch is then refused until both are replaced. The
+check above reads the listing endpoint that carries each policy's id but projects only the names,
+so read it again without the `--jq` to get the ids, `DELETE` each policy, and POST the new name.
 
 ## 8. A token for the scheduled provider-lock refresh *(needed from build-plan commit 25)*
 
@@ -368,7 +560,7 @@ claims were byte-identical. Two consequences a cloner will otherwise trip on:
   declare `environment:` cannot assume it at all — which is exactly what makes the prod
   reviewer gate real rather than decorative;
 - the branch restriction therefore cannot live in IAM at the same time. It lives in each
-  GitHub Environment's **deployment branch policy** instead, configured at build-plan step 4.2,
+  GitHub Environment's **deployment branch policy** instead, configured in section 7.4,
   before any workflow names an environment. GitHub creates an environment implicitly the first
   time a job references one, with no protection rules at all.
 
