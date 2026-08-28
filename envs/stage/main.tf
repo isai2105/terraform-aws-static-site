@@ -67,3 +67,5 @@ module "site" {
   # the arguments here; the module's README carries the two modes and which to
   # pick.
 }
+
+# Second verification pass. This branch is never merged.
