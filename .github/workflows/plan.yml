@@ -112,7 +112,11 @@ jobs:
               "must leave refs/pull/N/merge checked out"
             exit 1
           fi
-          changed="$(git diff --name-only HEAD^1 HEAD)"
+          # `core.quotePath=false` because the default renders a non-ASCII path
+          # as an escaped, double-quoted string, which would stop matching the
+          # directory name `find` reports below — and the direction that fails
+          # in is an environment quietly not planned.
+          changed="$(git -c core.quotePath=false diff --name-only HEAD^1 HEAD)"
           printf 'changed files:\n%s\n\n' "$changed"
 
           # Every directory under envs/ is an environment. This is the only
@@ -410,10 +414,20 @@ jobs:
           # are candidates: the marker is invisible when rendered, so a reviewer
           # who quotes one in a reply would otherwise have their comment
           # silently overwritten by the next push.
-          comment_id="$(
+          #
+          # The listing is captured before it is searched rather than piped
+          # into awk. An `exit` on the first match closes the pipe under a
+          # writer that may not have finished, and this script runs with
+          # `pipefail`, so the reader's shortcut would surface as the whole
+          # step failing on a SIGPIPE — on long pull requests only, which is
+          # the worst possible place for it to start happening.
+          comments="$(
             gh api --paginate "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --jq '.[] | select(.user.type == "Bot") | [.id, (.body | split("\n")[0])] | @tsv' \
-              | awk -F '\t' -v marker="$marker" '$2 == marker { print $1; exit }'
+              --jq '.[] | select(.user.type == "Bot") | [.id, (.body | split("\n")[0])] | @tsv'
+          )"
+          comment_id="$(
+            awk -F '\t' -v marker="$marker" \
+              '$2 == marker { print $1; exit }' <<< "$comments"
           )"
 
           if [ -n "$comment_id" ]; then
