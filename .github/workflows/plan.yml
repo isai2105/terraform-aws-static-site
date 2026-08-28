@@ -534,8 +534,8 @@ jobs:
               # to a pull request that changed an environment and never planned
               # it. That is the failure this whole job exists to prevent.
               if [ "$ENVIRONMENTS" != "[]" ]; then
-                echo "::error::no plan ran for ${ENVIRONMENTS}, which is not" \
-                  "the same as there being nothing to plan"
+                echo "::error::no plan ran for ${ENVIRONMENTS:-an unknown set}," \
+                  "which is not the same as there being nothing to plan"
                 exit 1
               fi
               echo "no environment changed; there was nothing to plan"
