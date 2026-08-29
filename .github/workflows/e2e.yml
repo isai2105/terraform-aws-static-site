@@ -1,0 +1,1023 @@
+# Stand `stage` up in a real AWS account, prove it serves what this repository
+# claims it serves, tear it down again, and prove the teardown left nothing
+# behind.
+#
+# This is the workflow the rest of the repository is arranged around. Every
+# other check here reasons about the configuration: `terraform validate` reads
+# it, TFLint and Trivy read it statically, `terraform test` plans it against a
+# provider that cannot reach AWS, and plan.yml refreshes real state without
+# changing it. None of them can say whether the thing this repository describes
+# still works, because none of them ever creates it. This one does, weekly,
+# against whatever AWS and the pinned provider have become since the last run —
+# which is what makes "reference implementation" a claim somebody checks rather
+# than a word in a README.
+#
+# It replaces drift detection, which would be meaningless here: nothing in this
+# repository stays deployed, so there is no standing infrastructure to drift.
+# What can rot instead is the lifecycle itself, and only a full apply-and-destroy
+# cycle exercises that.
+#
+# ---------------------------------------------------------------------------
+# What it does, and the step that is deliberately absent
+# ---------------------------------------------------------------------------
+#
+# Apply, smoke-test with `curl`, destroy, then verify the teardown against AWS
+# rather than against Terraform. There is **no wait-for-`Deployed` step between
+# the apply and the smoke tests**, and its absence is a decision rather than an
+# omission: the module sets `wait_for_deployment = true`, so `terraform apply`
+# does not return until CloudFront reports the distribution `Deployed`. That
+# wait is already most of the three minutes docs/TEARDOWN.md section 3 measures.
+# A separate polling job would watch a distribution that is already deployed —
+# a second gate that can only ever pass, reading as though the smoke tests
+# needed protection they do not have and do not need. If `wait_for_deployment`
+# is ever set to `false`, that step has to come back, and until it does the
+# smoke tests below stop being trustworthy.
+#
+# The apply and the destroy are `-auto-approve` here, and apply.yml's two-job
+# split — plan to an artefact, then apply *that* — is deliberately not repeated.
+# That split exists to put a reviewed plan in front of a human before anything
+# changes. There is no human on a 04:17 Monday run, and nothing to review: this
+# workflow's whole purpose is that the apply and the destroy happen unattended.
+# Copying the shape without the reviewer would be ceremony.
+#
+# ---------------------------------------------------------------------------
+# How this file authenticates
+# ---------------------------------------------------------------------------
+#
+# Every job here that touches AWS — the lifecycle job and the cleanup job that
+# runs after it has gone wrong — declares `environment: stage`, and that is not
+# decoration. There is one apply role per environment and each is trusted on
+# exactly one subject, `…:environment:<env>`, with no ref component at all
+# (bootstrap/oidc.tf records the claim as it was read out of a real token).
+# Naming an environment is what puts that claim in the OIDC token; a job that
+# omits it presents a subject no role trusts and fails
+# `AssumeRoleWithWebIdentity` outright.
+#
+# The same declaration is also what resolves `vars.AWS_APPLY_ROLE_ARN`. That
+# variable is set per GitHub Environment rather than on the repository
+# (docs/BOOTSTRAP.md section 7.4), and an environment-scoped value is only
+# visible to a job that declared the environment — so on a job without
+# `environment:` the expression resolves to the empty string and the failure is
+# reported as missing credentials rather than as a missing declaration.
+#
+# It matters most on the cleanup job, whose entire purpose is to run after
+# something has already gone wrong. An unauthenticated cleanup job turns a
+# failed teardown into a failed teardown *plus* a silent failure to report it.
+#
+# `stage` is self-service — no required reviewer — with a deployment branch
+# policy of `main`. A scheduled run is always on `main`, so the policy admits
+# it; a `workflow_dispatch` from a topic branch is refused by GitHub before any
+# AWS call is made. Two independent settings that happen to agree, which is the
+# kind of thing that stops being true without anyone noticing, so it is written
+# down.
+#
+# ---------------------------------------------------------------------------
+# Why `stage`, and only `stage`
+# ---------------------------------------------------------------------------
+#
+# There is one module in this repository. `envs/stage` and `envs/prod` both call
+# `static-site` with different variable values, not with different resources, so
+# a matrix over both environments would apply the same Terraform twice under a
+# second name and prove nothing the first apply did not — at the cost of a
+# second CloudFront teardown on every scheduled run.
+#
+# `prod` is the wrong one to pick even if only one is run. Its Environment
+# carries a required reviewer, and the apply role is trusted on the
+# `environment:` subject, so an unattended scheduled run against prod would sit
+# in `waiting` for an approval nobody is watching for — and this workflow's
+# `if: always()` destroy would never run at all, which is the single failure
+# this repository cannot tolerate. Automating around the reviewer would delete
+# the only thing prod demonstrates that stage does not. Prod is therefore
+# exercised by hand through apply.yml, which is a weaker guarantee, and the
+# README says so rather than letting a matrix imply parity.
+#
+# ---------------------------------------------------------------------------
+# The cleanup job is the point, not a belt-and-braces afterthought
+# ---------------------------------------------------------------------------
+#
+# `if: always()` on the destroy step guarantees the destroy *runs*. It does not
+# guarantee it *succeeds*, and the ways it fails here are ordinary: a state lock
+# stranded by a cancelled run — the one failure actually observed and walked end
+# to end in docs/TEARDOWN.md section 5 — a CloudFront delete that outlives the
+# provider's waiter, ACM's cross-service lag on the custom-domain path this
+# repository has never applied. The last two are unobserved and the ranking
+# matters, because it decides what the cleanup job should be good at: its
+# re-run has to expect a lock somebody else is still holding rather than a clean
+# slate, which is why it waits ten minutes for one instead of assuming it is
+# free.
+#
+# None of that weakens the case for the job. Its justification is that an
+# unattended weekly destroy can fail silently, which is true at any frequency: a
+# CloudFront distribution can sit in a real account for a week with nobody
+# looking, and in a repository whose stated goal is complete, verifiable
+# teardown that is the worst thing to leave to chance. A rarer failure on a
+# schedule nobody watches is an argument for the job, not against it.
+#
+# **It does not run on `failure()`.** A bare `if: failure()` fires whenever the
+# lifecycle job goes red, and the likeliest way for that to happen is a smoke
+# assertion failing against a distribution that then tore itself down perfectly.
+# Filing "E2E teardown failed" on that run would put an `orphaned-resources`
+# issue on a teardown that worked, and the label is only worth anything while it
+# means what it says. So the lifecycle job publishes what its own teardown
+# verification concluded, and the cleanup job runs when that conclusion is
+# anything other than `clean` — including when it is missing entirely, which is
+# what a runner lost mid-destroy leaves behind. Every uncertainty resolves
+# toward running the cleanup job.
+#
+# The one thing it is gated on positively is `armed`, published immediately
+# before the apply. A run that failed at `init`, or on an unset repository
+# variable, created nothing in AWS, and an orphan report from it would be a
+# false alarm on a label whose value is that it has never made one.
+#
+# ---------------------------------------------------------------------------
+# The `orphaned-resources` label is a precondition, not a step
+# ---------------------------------------------------------------------------
+#
+# The label is created once, by hand, and documented in **docs/BOOTSTRAP.md
+# section 7.5**. That section is the argument for why there is no
+# `gh label create --force` in the cleanup job below: a machine repairing its
+# own precondition at the moment it depends on it puts a repository mutation
+# ahead of the report, in the one job that by construction only runs after
+# something has already failed, where there is nothing left to catch it.
+#
+# Two properties recorded there constrain this file directly, and both are easy
+# to break with an edit that looks like a simplification:
+#
+#   - **`gh issue create --label`, never `gh api …/issues`.** `gh` resolves
+#     label names before it creates anything — `AddMetadataToIssueParams` at
+#     `pkg/cmd/issue/create/create.go:404`, `api.IssueCreate` not until `:410` —
+#     so on a repository missing the label no issue is created and the job fails
+#     loudly instead of filing an unlabelled one. That is a property of the
+#     command, not of GitHub: the REST endpoint has not been tested and section
+#     7.5 says so. Rewriting the call around `gh api` would silently drop the
+#     guarantee and leave that section arguing from a failure that no longer
+#     happens.
+#   - **The label match is case-insensitive** (`strings.EqualFold`,
+#     `api/queries_repo.go:811`), so the contract binds spelling and punctuation
+#     but not case. Nothing here spends that latitude; the string below is the
+#     string in section 7.5, exactly.
+#
+# ---------------------------------------------------------------------------
+# The hardening
+# ---------------------------------------------------------------------------
+#
+# The rules this file follows — SHA-pinned actions checked for `using: node24`,
+# `permissions: {}` widened per job, `runs-on: ubuntu-24.04`, a
+# `timeout-minutes` on every job and `persist-credentials: false` on every
+# checkout — are stated once and in full at the top of validate.yml, together
+# with which of them the `zizmor` job there enforces and which are held by hand.
+# That list was written out before this file existed and names it: the only file
+# in the repository that holds an apply role with nobody watching, destroying
+# real infrastructure on a schedule. Which makes it the last place to break the
+# list. Both timeouts below are larger than validate.yml's fifteen minutes and
+# are argued where they sit.
+
+name: e2e
+
+on:
+  schedule:
+    # Weekly, Monday morning UTC, and deliberately not on the hour: GitHub
+    # queues scheduled runs and the top of the hour is where the queue is
+    # longest, so `0 4 * * 1` buys a delay and nothing else. Early in the week
+    # so a failure has the week to be dealt with rather than a weekend to sit
+    # through.
+    #
+    # A scheduled workflow is disabled automatically after 60 days without
+    # repository activity. On a reference repository that goes quiet between
+    # bursts of work, that is a live failure mode and not a footnote: the run
+    # that stops happening is silent, and the first sign of it is this
+    # workflow's history simply ending.
+    - cron: "17 4 * * 1"
+
+  # On demand as well, because the reason to run this is usually "does it still
+  # work after that change" and waiting until Monday to find out is not a plan.
+  # No inputs: the environment is `stage` and the actions are the whole
+  # lifecycle. An input choosing the environment would be an input whose only
+  # other value is the one this file argues at length it must not take.
+  workflow_dispatch:
+
+# Nothing by default, granted back per job below. Rule 3 at the top of
+# validate.yml.
+permissions: {}
+
+# One group, because there is one environment and one state file to protect.
+#
+# It serialises this workflow against itself. It deliberately does **not** join
+# apply.yml's `apply-stage` group: those two meet at the state lock instead,
+# the way plan.yml and apply.yml already do, and a scheduled run that has to
+# wait for a lock reports the wait rather than being cancelled by it.
+#
+# `cancel-in-progress: false` for the reason apply.yml gives and one more of its
+# own. Cancelling an apply strands the state lock and leaves the infrastructure
+# half-changed — but here it also kills the `if: always()` destroy before it
+# runs, which is the one thing in this file that must not be interruptible. A
+# run that has started is never cancelled to make room for a newer one.
+concurrency:
+  group: e2e-stage
+  cancel-in-progress: false
+
+env:
+  # Suppresses the "now run terraform apply" advice Terraform prints for a human
+  # at a terminal. Nothing here is at a terminal.
+  TF_IN_AUTOMATION: "1"
+
+  # The environment this workflow operates, for the `run:` blocks. It is written
+  # twice — here and as the literal `environment:` on each job — because
+  # `jobs.<id>.environment` cannot read the `env` context, and the alternative is
+  # a `workflow_dispatch` input whose only purpose would be to carry a constant.
+  # The two must agree: this one picks the directory and the state key, that one
+  # picks the OIDC subject and therefore the role.
+  ENVIRONMENT: stage
+
+  # An object written under `/assets/` so the asset cache behaviour has
+  # something real to serve.
+  #
+  # The module seeds `index.html` and nothing else, so without this the only
+  # available `/assets/*` response would be an error response — which is exactly
+  # the confusion the assertion further down exists to detect, and asserting the
+  # asset caching against it would be asserting nothing. Uploading a byte of
+  # JavaScript costs one `aws s3 cp` with a credential already in hand, into a
+  # bucket that is destroyed minutes later. It is not a Terraform resource, so
+  # nothing plans it and nothing reads it back as drift; `force_destroy = true`
+  # on this environment removes it with the bucket, which is the same property
+  # the app repository's own deploys rely on.
+  #
+  # It is uploaded with no `Cache-Control` of its own, on purpose: that is what
+  # the documented deploy sequence does, and the header this workflow then
+  # asserts has to come from the response headers policy rather than from
+  # whatever last wrote the object.
+  PROBE_ASSET_KEY: assets/e2e-cache-probe.js
+
+jobs:
+  # Apply, smoke-test, destroy, verify — in one job, because every step after
+  # the apply depends on state the previous step left on the runner: the
+  # initialised backend, the outputs read out of it, and the working directory
+  # the destroy runs in. Splitting them across jobs would mean re-initialising
+  # and re-assuming the role between each, for no gain and one more place for a
+  # destroy to be skipped.
+  lifecycle:
+    name: lifecycle
+    runs-on: ubuntu-24.04
+    # Two hours, chosen against a ceiling rather than against how long this
+    # takes. The destroy half is measured at about three minutes across three
+    # distributions (docs/TEARDOWN.md section 3) and the apply is dominated by
+    # the same distribution wait — but the AWS provider waits on a CloudFront
+    # deletion with a hardcoded 90-minute waiter and no configurable `timeouts`
+    # block, so 90 minutes is also the longest a genuinely stuck destroy can
+    # hold this job before the provider gives up on its own.
+    #
+    # That is what makes any cap below 90 the wrong instrument here: it cannot
+    # fire on a hang, because the hang ends by itself first, so the only thing
+    # it could ever interrupt is an operation still legitimately in progress —
+    # and interrupting one is a SIGKILL mid-delete, leaving the `.tflock`
+    # stranded and a half-removed distribution the state no longer describes.
+    # The cap sits above the waiter with room for the apply either side of it,
+    # and what it actually bounds is a wedged runner. Against GitHub's default
+    # of six hours that is the whole value.
+    timeout-minutes: 120
+    environment: stage
+    permissions:
+      contents: read
+      # The OIDC token exchanged for stage's apply role.
+      id-token: write
+    outputs:
+      # Set immediately before the apply. Its meaning is "AWS resources may
+      # exist from this point on", and the cleanup job is gated on it so that a
+      # run which failed before creating anything cannot file an orphan report.
+      armed: ${{ steps.arm.outputs.armed }}
+
+      # What the teardown verification concluded. Anything other than `clean` —
+      # including the empty string a lost runner leaves — sends the cleanup job.
+      teardown: ${{ steps.verify.outputs.teardown }}
+    steps:
+      # A fresh clone with no bootstrap behind it has none of these set, and
+      # each fails somewhere unhelpful: an empty role ARN reads as "Credentials
+      # could not be loaded", an empty bucket as an S3 error about a name that
+      # is not in the file. Checked before the OIDC token is minted so that the
+      # error names the variable rather than the symptom.
+      #
+      # AWS_APPLY_ROLE_ARN is the one that is easy to get half-right. There is
+      # one apply role per environment and it is published on the GitHub
+      # Environment rather than on the repository, so an empty value here most
+      # often means it was set repository-wide instead — where a job that
+      # declares an environment cannot see it.
+      - name: Check the variables this workflow needs
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_APPLY_ROLE_ARN: ${{ vars.AWS_APPLY_ROLE_ARN }}
+        shell: bash
+        run: |
+          missing=()
+          for name in TF_STATE_BUCKET AWS_REGION AWS_APPLY_ROLE_ARN; do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::unset variables: ${missing[*]}. TF_STATE_BUCKET and" \
+              "AWS_REGION are repository variables; AWS_APPLY_ROLE_ARN is set on" \
+              "each GitHub Environment, so an empty one most often means it was" \
+              "set on the repository instead. All of them come from the" \
+              "bootstrap's repository_variable_commands output; see sections 6" \
+              "and 7.4 of docs/BOOTSTRAP.md"
+            exit 1
+          fi
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned Terraform version
+        id: terraform-version
+        # As in apply.yml: setup-terraform has no version-file input and
+        # defaults to `latest`, so .terraform-version is read here and passed in
+        # explicitly. The value is checked rather than interpolated straight
+        # into the output — an empty one is not an error setup-terraform
+        # reports, it falls back toward `latest`, and this workflow both writes
+        # state and destroys infrastructure.
+        shell: bash
+        run: |
+          version="$(cat .terraform-version)"
+          if [ -z "$version" ]; then
+            echo "::error::.terraform-version is empty; this run would apply and" \
+              "destroy on an unpinned Terraform"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.terraform-version.outputs.version }}
+          # The wrapper rewrites stdout to publish it as step outputs, which
+          # would mangle the Terraform output captured below, and nothing here
+          # reads those outputs.
+          terraform_wrapper: false
+
+      - name: Assume the apply role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          # What CloudTrail records. Made to say which workflow and which run,
+          # so that an unattended apply is distinguishable in the trail from a
+          # dispatched one.
+          role-session-name: e2e-stage-${{ github.run_id }}
+
+      # Terraform is invoked directly rather than through the Makefile, for the
+      # reason plan.yml and apply.yml give: the Makefile's targets init with
+      # `-backend-config=backend.hcl`, a gitignored per-account file that does
+      # not exist on a runner.
+      - name: Initialise the backend
+        shell: bash
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          terraform -chdir="envs/${ENVIRONMENT}" init \
+            -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${ENVIRONMENT}/terraform.tfstate" \
+            -backend-config="region=${TF_STATE_REGION}" \
+            -backend-config="use_lockfile=true"
+
+      # The line that divides "nothing has been created" from "something may
+      # have been". It is a step of its own rather than the first line of the
+      # apply below, and that is the whole reason it works: a step's outputs are
+      # collected when the step finishes, so a marker written inside the apply
+      # would be lost precisely when the runner dies part-way through one — the
+      # case where orphans are likeliest and a report matters most.
+      - name: Arm the teardown report
+        id: arm
+        shell: bash
+        run: echo "armed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Apply the environment
+        shell: bash
+        run: |
+          terraform -chdir="envs/${ENVIRONMENT}" apply \
+            -auto-approve \
+            -no-color \
+            -input=false \
+            -lock-timeout=10m
+
+      # Read once, here, while the state still exists — everything below this
+      # point needs values the destroy is about to remove.
+      #
+      # `content_security_policy` is the reason envs/stage/outputs.tf publishes
+      # it at all: the assertion further down compares the header CloudFront
+      # actually serves against the value the response headers policies were
+      # built from, rather than against a third copy of the string written into
+      # this file. Two copies across two repositories is the irreducible cost of
+      # neither repository cloning the other; a third inside one of them would
+      # pass while describing a distribution nobody had checked.
+      #
+      # The `Project` tag value is read off the deployed bucket rather than out
+      # of envs/<env>/terraform.tfvars, and the difference is not stylistic. The
+      # teardown assertion below searches for the tags this deployment's
+      # resources *actually carried*; reading the intended value out of a
+      # variable file would mean parsing HCL with `sed` to learn what the
+      # account was supposed to contain. The module's own precondition
+      # guarantees the tag is present and non-empty, so this cannot come back
+      # blank on a successful apply.
+      - name: Read the values the teardown assertions need
+        id: outputs
+        shell: bash
+        run: |
+          # `output -raw` exits non-zero on an output that does not exist, which
+          # `set -e` turns into a stop here. The emptiness check is separate
+          # because an output can exist and be empty, and it is written as a
+          # function that only ever reports — a helper that returned the value
+          # on stdout would swallow its own error message into the caller's
+          # command substitution.
+          require() {
+            if [ -z "$2" ]; then
+              echo "::error::the ${1} output of envs/${ENVIRONMENT} is empty, and" \
+                "this workflow depends on it"
+              exit 1
+            fi
+          }
+
+          site_url="$(terraform -chdir="envs/${ENVIRONMENT}" output -raw site_url)"
+          csp="$(terraform -chdir="envs/${ENVIRONMENT}" output -raw content_security_policy)"
+          bucket="$(terraform -chdir="envs/${ENVIRONMENT}" output -raw bucket_name)"
+          log_group="$(terraform -chdir="envs/${ENVIRONMENT}" output -raw access_log_group_name)"
+
+          require site_url "$site_url"
+          require content_security_policy "$csp"
+          require bucket_name "$bucket"
+          require access_log_group_name "$log_group"
+
+          project="$(aws s3api get-bucket-tagging --bucket "$bucket" \
+            --query "TagSet[?Key=='Project'].Value | [0]" --output text)"
+          if [ -z "$project" ] || [ "$project" = "None" ]; then
+            echo "::error::the site bucket carries no Project tag, so the teardown" \
+              "assertion has nothing to search for. The module's default_tags" \
+              "precondition should have made this impossible; see" \
+              "modules/static-site/tags.tf"
+            exit 1
+          fi
+
+          {
+            echo "site-url=${site_url}"
+            echo "csp=${csp}"
+            echo "bucket=${bucket}"
+            echo "log-group=${log_group}"
+            echo "project=${project}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "site:      ${site_url}"
+          echo "bucket:    ${bucket}"
+          echo "log group: ${log_group} (us-east-1)"
+          echo "Project:   ${project}"
+
+      - name: Seed an object under /assets/
+        shell: bash
+        env:
+          BUCKET: ${{ steps.outputs.outputs.bucket }}
+        run: |
+          printf '// cache probe for GitHub Actions run %s\n' "$GITHUB_RUN_ID" \
+            > "${RUNNER_TEMP}/probe.js"
+
+          # No --cache-control, deliberately. See PROBE_ASSET_KEY at the top of
+          # this file: the browser-facing header is the response headers
+          # policy's to set, and an origin header here would make the assertion
+          # below prove the upload rather than the distribution.
+          aws s3 cp "${RUNNER_TEMP}/probe.js" "s3://${BUCKET}/${PROBE_ASSET_KEY}" \
+            --content-type application/javascript \
+            --no-progress
+
+      # One step rather than one per assertion, and it accumulates rather than
+      # stopping at the first failure. On a weekly unattended run the useful
+      # artefact is a complete picture — every assertion's verdict from one
+      # cycle — not the first thing that went wrong followed by six skipped
+      # steps that would have said what else did. Each failure is also emitted
+      # as a workflow annotation, so the run page names them without anyone
+      # opening the log.
+      - name: Smoke-test the distribution
+        shell: bash
+        env:
+          SITE_URL: ${{ steps.outputs.outputs.site-url }}
+          EXPECTED_CSP: ${{ steps.outputs.outputs.csp }}
+        run: |
+          failures=0
+          headers="${RUNNER_TEMP}/response-headers"
+
+          # `--retry` here covers connection-level flakiness and the transient
+          # 5xx, nothing more. It is emphatically not the convergence wait this
+          # file's header explains the absence of: the distribution reported
+          # `Deployed` before `terraform apply` returned, and a request that
+          # needs minutes of patience after that is a finding rather than
+          # something to sleep through.
+          #
+          # Redirects are deliberately not followed. `redirect-to-https` applies
+          # to `http://` and every request here is already `https://`, so a 301
+          # is a change in behaviour and should be visible as one.
+          #
+          # curl's own exit status is dropped, and that is not laziness:
+          # `%{http_code}` is `000` for a request that got no response at all,
+          # so a transport failure arrives as a value the assertions below can
+          # judge rather than as a `set -e` stop that would take the rest of the
+          # report with it. Every assertion treats `000` as a failure.
+          #
+          # The header file is truncated first. curl appends to it across
+          # retries and redirects, so without this a failed attempt would leave
+          # the previous request's headers in place for `header` to read.
+          fetch() {
+            : > "$headers"
+            curl --silent --show-error \
+              --retry 3 --retry-delay 5 --retry-connrefused \
+              --max-time 30 \
+              --dump-header "$headers" \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              "${SITE_URL}$1" || true
+          }
+
+          # Header names are case-insensitive and HTTP/2 lower-cases them on the
+          # wire, so the lookup folds case rather than trusting what CloudFront
+          # happened to send. The value is cut from the whole line rather than
+          # taken as a field, because several of these contain the delimiter.
+          #
+          # The *last* match wins rather than the first: the dump file can hold
+          # more than one response when curl retried, and the response that
+          # matters is the one whose status `fetch` reported.
+          header() {
+            local want
+            want="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+            tr -d '\r' < "$headers" \
+              | awk -F': ' -v want="$want" \
+                  'tolower($1) == want { line = $0 }
+                   END { if (line != "") { sub(/^[^:]*: ?/, "", line); print line } }'
+          }
+
+          check() {
+            if [ "$2" = "$3" ]; then
+              printf 'ok    %s\n' "$1"
+            else
+              printf 'FAIL  %s\n' "$1"
+              printf '        expected: %s\n' "$3"
+              printf '        actual:   %s\n' "$2"
+              echo "::error::${1}: expected '${3}', got '${2}'"
+              failures=$(( failures + 1 ))
+            fi
+          }
+
+          # Takes the whole argument list rather than one string, so that a
+          # long message wraps across continuation lines instead of running off
+          # the side of the file.
+          fail() {
+            printf 'FAIL  %s\n' "$*"
+            echo "::error::$*"
+            failures=$(( failures + 1 ))
+          }
+
+          # 1. The document, served from the placeholder the module seeds.
+          #
+          # Each request is made once into a variable and then asserted, rather
+          # than called from inside `check`, so that the `header` lookups below
+          # it visibly read the response the line above fetched.
+          echo "--- GET /"
+          status="$(fetch /)"
+          check "GET / returns 200" "$status" "200"
+
+          # The browser-facing half of the split-caching design, which no cache
+          # policy can deliver: a cache policy decides what the *edge* does and
+          # emits no header to the viewer at all. Written here as a literal
+          # rather than read from the module, unlike the CSP below, because the
+          # two assertions are asking different questions. The CSP asks whether
+          # CloudFront serves what Terraform configured, so it must read
+          # Terraform's value or it asks nothing. This asks whether the caching
+          # contract this repository advertises still holds, and a value read
+          # from the module would make it true by construction.
+          check "/ is served no-cache" "$(header cache-control)" "no-cache"
+
+          # 2. The security headers, on the response a browser actually gets.
+          check "the CSP on / matches the value the policies were built from" \
+            "$(header content-security-policy)" "$EXPECTED_CSP"
+          check "X-Content-Type-Options on /" \
+            "$(header x-content-type-options)" "nosniff"
+
+          # HSTS is asserted by shape rather than by value. `max-age` is a
+          # number the module owns and repeating it here would be the second
+          # copy the CSP assertion above exists to avoid; the two directives
+          # are decisions the module argues at length and neither is a duplicated
+          # value. `preload` in particular is a one-way door the module
+          # deliberately does not walk through.
+          hsts="$(header strict-transport-security)"
+          echo "      Strict-Transport-Security: ${hsts:-<absent>}"
+          case "$hsts" in
+            *max-age=*) printf 'ok    HSTS is present with a max-age\n' ;;
+            *) fail "HSTS is absent or carries no max-age" ;;
+          esac
+          case "$hsts" in
+            *includeSubDomains*) printf 'ok    HSTS includes subdomains\n' ;;
+            *) fail "HSTS does not carry includeSubDomains" ;;
+          esac
+          case "$hsts" in
+            *preload*)
+              fail "HSTS carries preload, which the module deliberately does" \
+                "not request: it is a one-way door on a domain the caller owns"
+              ;;
+            *) printf 'ok    HSTS does not request preload\n' ;;
+          esac
+
+          # 3. A deep link: no such key exists in the bucket, and the SPA has to
+          # get the document anyway. This is the assertion the single-page
+          # routing design lives or dies by.
+          echo "--- GET /projects/x"
+          status="$(fetch /projects/x)"
+          check "a deep link returns 200" "$status" "200"
+
+          # 4. The asset behaviour, against the object seeded above.
+          echo "--- GET /${PROBE_ASSET_KEY}"
+          status="$(fetch "/${PROBE_ASSET_KEY}")"
+          check "an asset returns 200" "$status" "200"
+          check "an asset is served immutable" \
+            "$(header cache-control)" "public, max-age=31536000, immutable"
+
+          # 5. A missing asset, which is the assertion with teeth.
+          #
+          # CloudFront's CustomErrorResponses is defined once per distribution
+          # and applies to every cache behaviour — it cannot be scoped to the
+          # default one — so a 403 for a missing hashed chunk under /assets/ is
+          # answered with 200 and the body of index.html: HTML where the browser
+          # expects JavaScript. The browser throws a parse error, monitoring
+          # sees a healthy 200, and the failure is close to undiagnosable. It is
+          # the standard trap of the error-response SPA pattern and it is
+          # exactly what a partial deploy produces.
+          #
+          # No plan-time test can see this. Only a live request to a missing key
+          # can, and this is the first workflow in the repository that makes
+          # one.
+          echo "--- GET /assets/does-not-exist.js"
+          status="$(fetch /assets/does-not-exist.js)"
+          content_type="$(header content-type)"
+          echo "      status: ${status}, content-type: ${content_type:-<absent>}"
+          if [ "$status" = "000" ]; then
+            # Written out rather than folded into the arm below, because "no
+            # response" must not read as "not the SPA document".
+            fail "the request for /assets/does-not-exist.js got no response at" \
+              "all, so this assertion checked nothing"
+          elif [ "$status" = "200" ]; then
+            case "$content_type" in
+              text/html*)
+                fail "a missing asset returned 200 with content-type" \
+                  "${content_type}: /assets/* is being answered with the SPA" \
+                  "document, so a missing hashed chunk reaches the browser as" \
+                  "HTML under a healthy status"
+                ;;
+              *)
+                printf 'ok    a missing asset returns 200 but not the SPA document\n'
+                ;;
+            esac
+          else
+            printf 'ok    a missing asset returns %s rather than the SPA document\n' "$status"
+          fi
+
+          echo
+          if [ "$failures" -gt 0 ]; then
+            echo "::error::${failures} smoke assertion(s) failed"
+            exit 1
+          fi
+          echo "all smoke assertions passed"
+
+      # `if: always()`, and it is the most important two words in this file. A
+      # failed assertion above must not leave a distribution running: the run
+      # goes red on the assertion, and the environment still comes down.
+      #
+      # `terraform destroy` rather than apply.yml's saved `-destroy` plan, for
+      # the reason given in this file's header — there is no reviewer here and
+      # therefore nothing for an artefact to carry.
+      - name: Destroy the environment
+        if: always()
+        shell: bash
+        run: |
+          terraform -chdir="envs/${ENVIRONMENT}" destroy \
+            -auto-approve \
+            -no-color \
+            -input=false \
+            -lock-timeout=10m
+
+      # A destroy exiting 0 is a claim, not evidence, and the check has to be
+      # AWS-side. A state-based check can only see what Terraform still tracks,
+      # and the things that survive a destroy are by definition the things
+      # Terraform stopped tracking. (A follow-up `plan` proves nothing at all:
+      # after a successful destroy the state is empty but the configuration
+      # still describes the environment, so `plan` reports the whole thing *to
+      # add*, forever.)
+      #
+      # Three assertions, and they fail in two different ways on purpose.
+      #
+      # `terraform state list` is the hard one: anything left in state means the
+      # destroy did not finish, which is unambiguous and fails the run.
+      #
+      # The tagging inventory reports rather than fails, because a non-zero
+      # answer here is not proof of a leak — the resource groups tagging API is
+      # eventually consistent and will list a resource for a while after it is
+      # gone, which is what the retry below is for. What a persistent non-zero
+      # answer deserves is a tracking issue and a human, not a red run that says
+      # "AWS was slow".
+      #
+      # It queries **both** regions, and that is measured rather than defensive:
+      # docs/TEARDOWN.md section 6.2 counted one taggable resource in the
+      # environment's own region and five in us-east-1, because CloudFront's
+      # logging control plane answers only there whatever region the environment
+      # uses. A single-region query reports success over five live resources.
+      #
+      # The log group is checked by name as well, and it is not redundant with
+      # the query above. The tagging API returns only *tagged* resources, and
+      # the specific way this module can break — an aliased provider missing its
+      # `default_tags`, which envs/stage/providers.tf argues about at length —
+      # produces untagged us-east-1 resources that no tag query can see. This is
+      # what envs/stage/outputs.tf publishes `access_log_group_name` for.
+      #
+      # What none of this can see is named rather than glossed: CloudFront cache
+      # policies, response headers policies and origin access controls expose no
+      # tags at all, so a leak of the two quota-bearing policy types is
+      # invisible to every assertion here. They are covered by the state
+      # assertion in every failure mode this workflow can produce — a destroy
+      # that leaves them behind leaves them in state — and by the manual
+      # detector in docs/TEARDOWN.md section 6.1 otherwise.
+      - name: Verify the teardown against AWS
+        id: verify
+        if: always()
+        shell: bash
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          PROJECT: ${{ steps.outputs.outputs.project }}
+          LOG_GROUP: ${{ steps.outputs.outputs.log-group }}
+        run: |
+          teardown=clean
+          hard_failure=0
+
+          # Whole argument list, as in the smoke step: a long message wraps.
+          note_dirty() {
+            teardown=dirty
+            echo "::warning::$*"
+          }
+
+          # 1. State.
+          echo "--- terraform state list"
+          remaining="$(terraform -chdir="envs/${ENVIRONMENT}" state list)"
+          if [ -n "$remaining" ]; then
+            printf '%s\n' "$remaining"
+            count="$(printf '%s\n' "$remaining" | wc -l | tr -d ' ')"
+            echo "::error::the destroy left ${count} resource(s) in state"
+            teardown=dirty
+            hard_failure=1
+          else
+            echo "ok    state is empty"
+          fi
+
+          # 2. The tag inventory, in the environment's region and in us-east-1.
+          #
+          # Unavailable when the apply never got far enough to publish outputs.
+          # The state assertion above carries the check alone in that case, and
+          # it can: a partial apply is fully recorded in state as it happens, so
+          # an empty state after one means Terraform removed everything it made.
+          if [ -z "$PROJECT" ]; then
+            echo "--- tag inventory: skipped"
+            echo "      no Project tag was captured, which means this run never" \
+              "completed an apply. The state assertion above stands on its own here."
+          else
+            echo "--- tag inventory for Project=${PROJECT} Env=${ENVIRONMENT}"
+
+            regions=("$AWS_REGION")
+            if [ "$AWS_REGION" != "us-east-1" ]; then
+              regions+=("us-east-1")
+            fi
+
+            # A short retry for the tagging API's eventual consistency, not for
+            # a teardown still in progress: the destroy above has already
+            # returned by the time this runs.
+            attempts=6
+            total=0
+            for attempt in $(seq 1 "$attempts"); do
+              total=0
+              for region in "${regions[@]}"; do
+                found="$(aws resourcegroupstaggingapi get-resources \
+                  --region "$region" \
+                  --tag-filters "Key=Project,Values=${PROJECT}" "Key=Env,Values=${ENVIRONMENT}" \
+                  --query 'length(ResourceTagMappingList)' \
+                  --output text)"
+                printf '      attempt %s, %s: %s\n' "$attempt" "$region" "$found"
+                total=$(( total + found ))
+              done
+              if [ "$total" -eq 0 ]; then
+                break
+              fi
+              if [ "$attempt" -lt "$attempts" ]; then
+                sleep 20
+              fi
+            done
+
+            if [ "$total" -eq 0 ]; then
+              echo "ok    no tagged resources remain in ${regions[*]}"
+            else
+              note_dirty "the tagging API still reports ${total} resource(s)" \
+                "tagged Project=${PROJECT} Env=${ENVIRONMENT} after" \
+                "${attempts} attempts"
+            fi
+          fi
+
+          # 3. The access log group, by name, in us-east-1.
+          if [ -z "$LOG_GROUP" ]; then
+            echo "--- access log group: skipped, no name was captured"
+          else
+            echo "--- access log group ${LOG_GROUP} (us-east-1)"
+            surviving="$(aws logs describe-log-groups \
+              --region us-east-1 \
+              --log-group-name-prefix "$LOG_GROUP" \
+              --query "length(logGroups[?logGroupName=='${LOG_GROUP}'])" \
+              --output text)"
+            if [ "$surviving" -eq 0 ]; then
+              echo "ok    the access log group is gone"
+            else
+              note_dirty "the CloudFront access log group ${LOG_GROUP} still" \
+                "exists in us-east-1"
+            fi
+          fi
+
+          echo "teardown=${teardown}" >> "$GITHUB_OUTPUT"
+          echo
+          echo "teardown: ${teardown}"
+          exit "$hard_failure"
+
+  # Re-run the destroy once, then file a tracking issue. This job is the reason
+  # the workflow above can be trusted to run unattended; the header argues its
+  # case and the trigger condition at length.
+  cleanup:
+    name: cleanup
+    needs: lifecycle
+    # `always()` rather than `failure()`, narrowed by what the lifecycle job
+    # concluded about its own teardown. See the header: a smoke assertion
+    # failing over a teardown that worked must not file an orphan report, and a
+    # missing conclusion — the empty string a lost runner leaves behind — must.
+    if: >-
+      always()
+      && needs.lifecycle.outputs.armed == 'true'
+      && needs.lifecycle.outputs.teardown != 'clean'
+    runs-on: ubuntu-24.04
+    # The same two hours as the job above, and for the same ceiling: this job's
+    # whole purpose is to re-attempt the destroy that did not finish, so the
+    # provider's 90-minute CloudFront waiter bounds it identically.
+    timeout-minutes: 120
+    # Without this the job cannot authenticate at all — the apply role is
+    # trusted on the `environment: stage` subject and on nothing else, and
+    # `vars.AWS_APPLY_ROLE_ARN` is environment-scoped. On the one job that only
+    # runs after something has gone wrong, that would turn a failed teardown
+    # into a failed teardown nobody hears about.
+    environment: stage
+    permissions:
+      contents: read
+      id-token: write
+      # The tracking issue. This is the only grant in this repository that lets
+      # a workflow write anything to the repository other than plan.yml's
+      # pull-request comment.
+      issues: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned Terraform version
+        id: terraform-version
+        shell: bash
+        run: |
+          version="$(cat .terraform-version)"
+          if [ -z "$version" ]; then
+            echo "::error::.terraform-version is empty; the cleanup destroy would" \
+              "run on an unpinned Terraform"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.terraform-version.outputs.version }}
+          terraform_wrapper: false
+
+      - name: Assume the apply role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: e2e-cleanup-stage-${{ github.run_id }}
+
+      - name: Initialise the backend
+        shell: bash
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          terraform -chdir="envs/${ENVIRONMENT}" init \
+            -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${ENVIRONMENT}/terraform.tfstate" \
+            -backend-config="region=${TF_STATE_REGION}" \
+            -backend-config="use_lockfile=true" \
+            2>&1 | tee "${RUNNER_TEMP}/cleanup.log"
+
+      # Once. Not a loop, and not a `force-unlock`.
+      #
+      # The failure this job most expects is a lock the previous run stranded,
+      # so the destroy waits ten minutes for one rather than assuming the state
+      # is free — which is what turns "somebody else's apply is running" into a
+      # successful second destroy. It does **not** break the lock: a stranded
+      # lock and a live one are indistinguishable from here, and a `force-unlock`
+      # against a live apply is how two processes end up writing the same state.
+      # When the wait expires, the issue below carries the lock id Terraform
+      # printed, and docs/BOOTSTRAP.md section 9.1 is the three-command recovery.
+      #
+      # The log is appended to the init log rather than replacing it, because
+      # which of the two failed is most of the diagnosis and the issue should
+      # carry whichever got that far.
+      - name: Re-run the destroy
+        shell: bash
+        run: |
+          terraform -chdir="envs/${ENVIRONMENT}" destroy \
+            -auto-approve \
+            -no-color \
+            -input=false \
+            -lock-timeout=10m \
+            2>&1 | tee -a "${RUNNER_TEMP}/cleanup.log"
+
+      # `if: always()`, so a second failed destroy still gets reported. This is
+      # the step the whole job exists for: without it a failed unattended
+      # teardown is a red square in a history nobody is watching on a Monday
+      # morning.
+      #
+      # `gh issue create --label`, never `gh api …/issues` — see the header, and
+      # docs/BOOTSTRAP.md section 7.5 for the source references behind it. The
+      # label is a precondition created by hand; nothing here creates it.
+      - name: File a tracking issue
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TEARDOWN: ${{ needs.lifecycle.outputs.teardown }}
+        run: |
+          body="${RUNNER_TEMP}/issue-body.md"
+          log="${RUNNER_TEMP}/cleanup.log"
+
+          # A GitHub issue body is capped at 65536 characters and is rejected
+          # wholesale past it, so the log is bounded well below that with room
+          # for the prose around it. The tail is kept rather than the head:
+          # Terraform prints its verdict last. `iconv -c` drops the partial
+          # character `tail -c` can leave at the cut.
+          budget=40000
+
+          # As in apply.yml's summary step: markdown wants backticks and a shell
+          # reads one as command substitution, so they are composed from an
+          # escape rather than written out. The fence is four of them, so a
+          # fence inside Terraform's own output cannot close it early.
+          tick="$(printf '\140')"
+          fence="${tick}${tick}${tick}${tick}"
+
+          verdict="${TEARDOWN:-none recorded}"
+
+          {
+            printf 'The scheduled end-to-end run on %s%s%s did not verify a clean teardown.\n\n' \
+              "$tick" "$ENVIRONMENT" "$tick"
+            printf -- '- Run: %s\n' "$RUN_URL"
+            printf -- '- Environment: %s%s%s\n' "$tick" "$ENVIRONMENT" "$tick"
+            printf -- '- Teardown verdict from the lifecycle job: %s%s%s\n\n' \
+              "$tick" "$verdict" "$tick"
+            printf 'A verdict of %sdirty%s means the lifecycle job ran its teardown check\n' \
+              "$tick" "$tick"
+            printf 'and found something left over. No verdict at all means it never reached\n'
+            printf 'the check — a runner lost mid-destroy, or a verification step that failed\n'
+            printf 'on its own. Either way this job re-ran the destroy once, and its output\n'
+            printf 'is below.\n\n'
+            printf '**What to do.** Work the post-destroy checklist in %sdocs/TEARDOWN.md%s\n' \
+              "$tick" "$tick"
+            printf 'section 6 — it covers the resources no tag query can see, which is most\n'
+            printf 'of them. If the log below ends on a state lock, %sdocs/BOOTSTRAP.md%s\n' \
+              "$tick" "$tick"
+            printf 'section 9.1 is the recovery, and it starts by confirming that no run is\n'
+            printf 'actually in flight.\n\n'
+            printf '<details><summary>Cleanup destroy output</summary>\n\n'
+            printf '%sterraform\n' "$fence"
+            if [ ! -s "$log" ]; then
+              printf 'No Terraform output was captured; the job failed before Terraform ran.\n'
+            elif [ "$(wc -c < "$log")" -gt "$budget" ]; then
+              printf '[truncated to the last %s characters; the full output is in the run log]\n\n' "$budget"
+              tail -c "$budget" "$log" | iconv -c -f UTF-8 -t UTF-8
+            else
+              cat "$log"
+            fi
+            printf '\n%s\n\n' "$fence"
+            printf '</details>\n'
+          } > "$body"
+
+          gh issue create \
+            --title "E2E teardown failed on ${GITHUB_RUN_ID}" \
+            --label orphaned-resources \
+            --body-file "$body"
