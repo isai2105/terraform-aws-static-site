@@ -117,13 +117,33 @@ locals {
 
   # Native S3 locking writes `<key>.tflock` beside the state object and deletes
   # it when the run finishes. These are siblings of the ARNs above, not children
-  # of them — a property two statements below depend on: the deny in
-  # `plan_state`, which must not reach the lock, and the per-environment grants
-  # in `apply_state`, which have to name both keys rather than one key and a
-  # trailing wildcard.
+  # of them — a property three statements below depend on: the deny in
+  # `plan_state`, which must not reach the lock; the per-environment grants in
+  # `apply_state`, which have to name both keys rather than one key and a
+  # trailing wildcard; and `apply_state`'s cross-environment deny, which has to
+  # name both keys of every other environment for the same reason.
   state_lock_arns = {
     for environment in var.environments :
     environment => "${aws_s3_bucket.state.arn}/${environment}/terraform.tfstate.tflock"
+  }
+
+  # The state objects an apply role must never touch: every environment's state
+  # key and lock except its own, keyed by the environment whose role it is.
+  #
+  # Derived from the two maps above rather than written out, so the deny that
+  # consumes this and the grants it completes cannot disagree about the bucket's
+  # layout — the same single definition read a third way, and the reason adding
+  # an environment cannot leave the deny naming a key nothing writes.
+  #
+  # Empty when `var.environments` names one environment, which is why the
+  # statement consuming it is `dynamic`: a policy statement whose resource list
+  # is empty renders no `Resource` key at all, and IAM rejects that outright.
+  other_environment_state_arns = {
+    for environment in var.environments :
+    environment => concat(
+      [for name, arn in local.state_object_arns : arn if name != environment],
+      [for name, arn in local.state_lock_arns : arn if name != environment],
+    )
   }
 
   # The namespace the site buckets live in.
@@ -625,12 +645,13 @@ resource "aws_iam_role" "apply" {
 # than plan: it writes state.
 #
 # One document per environment, and this is where the isolation described at the
-# top of this section actually lives — two object ARNs, both named in full. The
-# lock is a *sibling* of the state key rather than a child of it, so the pair
-# cannot be collapsed into `<env>/terraform.tfstate*`: that wildcard reads as
-# tidier and would also match `<env>/terraform.tfstate.backup` and anything else
-# someone later writes beside the key, which is the opposite of what naming two
-# exact objects is for.
+# top of this section actually lives — two object ARNs named in full at the top,
+# and a deny naming every other environment's two at the bottom. The lock is a
+# *sibling* of the state key rather than a child of it, so neither pair can be
+# collapsed into `<env>/terraform.tfstate*`: that wildcard reads as tidier and
+# would also match `<env>/terraform.tfstate.backup` and anything else someone
+# later writes beside the key, which is the opposite of what naming exact
+# objects is for.
 #
 # `s3:DeleteObject` on the state object is deliberately absent. Terraform empties
 # state on destroy by writing an empty state file, not by deleting the object,
@@ -664,50 +685,6 @@ data "aws_iam_policy_document" "apply_state" {
 
     resources = [local.state_lock_arns[each.key]]
   }
-
-  # There is no statement denying the other environments' state objects. That is
-  # recorded here as a named residual rather than as a settled decision, because
-  # the standard `plan_state` sets further up — a deny is "not load-bearing
-  # today, it is load-bearing against the future edit" — argues for one.
-  #
-  # What holds today is structural and checkable by reading this file: the only
-  # S3 grant in `apply_infrastructure` names `local.site_bucket_arns`,
-  # `apply_identity` grants no S3 at all, and `local.site_bucket_prefix` exists
-  # to keep the site namespace disjoint from the state bucket's own name. No
-  # allow attached to an apply role reaches another environment's state key.
-  #
-  # What that does not survive is a widened *pattern*, and one is easy to
-  # picture: `ManageSiteBuckets` broadened from `<prefix>-site-*` to
-  # `<prefix>-*` is a one-character-class edit on two names that already share a
-  # prefix, and it would hand every apply role `s3:*` over the state bucket at
-  # once. The exposure differs from plan's in shape rather than in severity.
-  # `plan_read`'s own grant already names every environment's state object, so
-  # the deny there defends a resource an allow is pointed at; here it would
-  # defend a resource no allow names yet — while docs/BOOTSTRAP.md says this
-  # policy is expected to be missing an action or two, which makes it the more
-  # likely of the two to be edited.
-  #
-  # Two shapes were considered, and neither is here for a different reason.
-  #
-  # A `not_resources` whitelist — deny S3 on everything except this role's two
-  # state keys, the bucket it lists, and the site ARNs — is the only form that
-  # closes the widening completely, and it is rejected on cost rather than on
-  # effect. It would become a second authoritative statement of this role's
-  # entire S3 reach, which every future S3 grant in this file would also have to
-  # be added to; omit it once and the new grant is refused by a deny no allow
-  # can override, so the obvious repair — add the allow — does not work. That
-  # inverts the failure preference argued everywhere else here, where being too
-  # narrow costs a named AccessDenied that one line fixes.
-  #
-  # A blacklist naming the other environments' state objects has neither
-  # problem, is generated from the same local as the grant above, and would
-  # catch the widening. Its costs are a `dynamic` guard so a single-environment
-  # list does not render a statement with no resources, and a policy update on
-  # every existing role whenever an environment is added. It is absent only
-  # because every deny in this file so far carves back a grant that exists, and
-  # this one would not. Add it the moment any grant on these roles reaches the
-  # state bucket by pattern rather than by the literal ARNs above — that is the
-  # trigger, and it is checkable by reading the Resource lines in this file.
 
   # The S3 backend lists the bucket during init.
   #
@@ -750,6 +727,90 @@ data "aws_iam_policy_document" "apply_state" {
     ]
 
     resources = [aws_s3_bucket.state.arn]
+  }
+
+  # The object-level half of the boundary the statement above draws at the
+  # bucket.
+  #
+  # `DenyStateBucketReconfiguration` stops at the bucket ARN by construction:
+  # extending it to `<bucket>/*` would deny the two grants at the top of this
+  # document, which are the whole point of the role. Naming the *other*
+  # environments' objects is the only form that reaches objects without reaching
+  # this role's own, so this finishes a control the file had already started
+  # rather than adding a new one.
+  #
+  # Like its sibling — and like `DenyStateMutation` in `plan_state` — it carves
+  # back no grant that exists today, and that is the standard rather than an
+  # exception to it. No allow on an apply role reaches another environment's
+  # state key: `apply_infrastructure`'s only S3 grant names
+  # `local.site_bucket_arns`, `apply_identity` grants no S3 at all, and
+  # `local.site_bucket_prefix` exists to keep the site namespace disjoint from
+  # `<name_prefix>-tfstate-`. Every deny on this bucket is written against the
+  # edit that would change that, on the reasoning `plan_state` sets out in full:
+  # an explicit deny cannot be overridden by any allow, so the withholding
+  # survives the edit rather than depending on nobody making it.
+  #
+  # The edit is nameable, which is why the withholding is worth encoding.
+  # `ManageSiteBuckets` broadened from `<prefix>-site-*` to `<prefix>-*` is a
+  # one-token change on two names that already share a prefix, and it would hand
+  # every apply role `s3:*` over the state bucket at once — while
+  # docs/BOOTSTRAP.md says that policy is expected to be missing an action or
+  # two, which makes it the likeliest thing in this file to be edited.
+  #
+  # What this closes under that edit, and what it does not, because a deny reads
+  # stronger than it is. Closed, permanently and by any S3 action: the other
+  # environments' state and lock objects — and closed *explicitly*, which is the
+  # whole of the observable change. `iam simulate-principal-policy` answered
+  # implicitDeny on those keys before and answers explicitDeny after; nothing an
+  # apply role can do today changes either way. Left open: everything else the
+  # widening would grant, including `s3:DeleteObject` and
+  # `s3:DeleteObjectVersion` on this role's *own* state object, which the first
+  # statement withholds on purpose, and object-level reach over any key in this
+  # bucket that is not one of the four named here.
+  #
+  # The form that closes all of it is a `not_resources` whitelist — deny S3 on
+  # everything except this role's own two keys, the bucket it lists and the site
+  # ARNs — and it is rejected on cost rather than on effect. It would become a
+  # second authoritative statement of this role's entire S3 reach, which every
+  # future S3 grant in this file would also have to be added to; omit it once
+  # and the new grant is refused by a deny no allow can override, so the obvious
+  # repair — add the allow — does not work. That inverts the failure preference
+  # argued everywhere else here.
+  #
+  # The statement below carries a smaller version of that hazard, and it is
+  # worth naming rather than waving away: a future design in which one
+  # environment's root read another's state through `terraform_remote_state`
+  # would be refused here by a deny no allow can override either. What makes it
+  # acceptable is not that the intent behind it is good — it is that the failure
+  # is legible. The refusal quotes the exact object ARN, and that ARN is
+  # generated in one place, so the repair is findable from the error. The
+  # whitelist's failure is a grant silently missing from a list, which quotes
+  # nothing.
+  #
+  # `s3:*` rather than an enumerated action list, on the reasoning
+  # `ManageSiteBuckets` uses for the same operator: the resources are exact
+  # object ARNs this role must never touch by any action, so enumerating could
+  # only ever leave one out. Object ARNs only, never the bucket ARN —
+  # `s3:ListBucket` is authorised against the bucket, so `init`'s listing is
+  # untouched by this.
+  #
+  # `dynamic` because a single-environment `var.environments` leaves nothing to
+  # deny. Measured, by rendering this document against a one-element list: an
+  # empty `resources` emits a statement with no `Resource` key at all. That such
+  # a statement is malformed is inferred from the policy grammar rather than
+  # provoked here, since provoking it costs an apply. Adding a third environment
+  # rewrites this statement on every role that already exists, in place: these
+  # are inline policies, so it is a `PutRolePolicy` and the role itself is
+  # untouched.
+  dynamic "statement" {
+    for_each = length(local.other_environment_state_arns[each.key]) > 0 ? [local.other_environment_state_arns[each.key]] : []
+
+    content {
+      sid       = "DenyOtherEnvironmentState"
+      effect    = "Deny"
+      actions   = ["s3:*"]
+      resources = statement.value
+    }
   }
 }
 
