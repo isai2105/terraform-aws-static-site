@@ -169,10 +169,21 @@ data "aws_iam_policy_document" "site" {
     # withholds key-existence information from a caller not allowed to enumerate
     # the bucket.
     #
-    # Every later decision about SPA routing depends on that. The custom error
-    # responses that arrive with the routing work have to map 403 as well as 404
-    # for exactly this reason, and a future edit that adds ListBucket here would
-    # silently change which status code a missing deep link produces.
+    # The dependency that used to run from here into the SPA routing has
+    # inverted, and the inversion is worth stating because the fact above did
+    # not change while everything resting on it did. The custom error responses
+    # this note once justified — 403 mapped to the document, because 403 is what
+    # an OAC bucket actually returns for a client-side route — are gone. A
+    # viewer-request function now decides at the edge whether a path names a
+    # file, so no deep link depends on the origin's refusal carrying a
+    # particular number any more.
+    #
+    # What depends on this grant is the other half. A request that reaches the
+    # origin at all is one the edge judged to be a file, so the origin's refusal
+    # is the answer the viewer gets, and this line is what makes that answer a
+    # 403 rather than a 404. A future edit adding ListBucket would turn it into a
+    # 404 — still a refusal, so the routing survives it — and would falsify the
+    # end-to-end assertion that names 403, which is where it would be noticed.
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.site.arn}/*"]
 
@@ -234,14 +245,15 @@ resource "aws_s3_bucket_policy" "site" {
 # servable.
 #
 # Without it an environment applies to a distribution in front of an empty
-# bucket, and the failure is worse than an empty page. A request for `/`
-# resolves to `index.html`, the bucket has no such key, and the origin answers
-# 403 — so the custom error responses in cloudfront.tf try to fetch their own
-# error page, which is that same missing `/index.html`. CloudFront gives up and
-# hands the viewer the original error. Every smoke-test assertion in the
-# end-to-end workflow would then fail against infrastructure that is in fact
-# correct, and the first instinct on reading that failure is to go looking for
-# the bug in the distribution.
+# bucket, and the failure is worse than an empty homepage: every route in the
+# application fails at once and for the same reason. A request for `/` resolves
+# to `index.html` — by the default root object, by the viewer-request function
+# in cloudfront.tf, or by both — the bucket has no such key, and the viewer gets
+# the origin's 403. Every deep link resolves to that same missing key, because
+# the whole of the routing design is that one document answers all of them.
+# Every smoke-test assertion in the end-to-end workflow would then fail against
+# infrastructure that is in fact correct, and the first instinct on reading that
+# failure is to go looking for the bug in the distribution.
 #
 # It is a placeholder, not a fallback. The app repository's deploy overwrites
 # this key with the real build, and nothing here should ever put it back.

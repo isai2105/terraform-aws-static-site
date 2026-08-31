@@ -328,7 +328,10 @@ and the resources most worth worrying about are the ones that leave state withou
 Run these after the last environment is destroyed and before tearing down the bootstrap.
 
 The "Found" column is what this checklist returned on 2026-08-27, run twice — after the two-pass
-teardown across a `force-unlock`, and after the clean prod destroy. **Identical both times.**
+teardown across a `force-unlock`, and after the clean prod destroy. **Identical both times.** One
+row carries no measurement and says so: the viewer-request function arrived after that day, so
+its check is written from the same reasoning as the others and has never been run. A blank in a
+column of results is worth more than a number copied from the row above it.
 
 | # | Check | Why it is on the list | Found |
 |---|---|---|---|
@@ -336,43 +339,60 @@ teardown across a `force-unlock`, and after the clean prod destroy. **Identical 
 | 2 | Custom **cache policies** | Quota **20 per account**, account-wide; the module creates 2 per environment | **0** |
 | 3 | Custom **response headers policies** | Quota **20 per account**, account-wide; 2 per environment; invisible to any tag query | **0** |
 | 4 | **Origin access controls** | Quota 100 per account; the name carries the bucket's random suffix, so a leak is invisible to a name-stable check *and* to tags | **none** |
-| 5 | Log groups under `/aws/vendedlogs/cloudfront/<name_prefix>-site-*`, **in us-east-1** | Accrues cost after the environment is gone; retention bounds it, it does not remove it | **none** |
-| 6 | Delivery **sources**, **destinations** and **deliveries**, us-east-1 | Four resources that are permanently in us-east-1 whatever region the environment uses | **`[]` / `[]` / `[]`** |
-| 7 | ACM certificates in us-east-1 left `PENDING_VALIDATION`, and the validation record in your hosted zone | Section 7 — reachable only on the custom-domain path, which nothing here has applied | **none from this repository** |
-| 8 | Site buckets, by name | — | **404 on all three** |
-| 9 | Tag inventory for `Project` and `Env`, **in both regions** | The assertion the end-to-end workflow will make | **empty, all four queries** |
-| 10 | A stranded `.tflock` in the state bucket | Section 5.2 | **none** |
+| 5 | **CloudFront Functions** | Quota 100 per account; untaggable and named with the bucket's random suffix, so exactly as invisible as the origin access control above | **not measured — this resource postdates the walk-through** |
+| 6 | Log groups under `/aws/vendedlogs/cloudfront/<name_prefix>-site-*`, **in us-east-1** | Accrues cost after the environment is gone; retention bounds it, it does not remove it | **none** |
+| 7 | Delivery **sources**, **destinations** and **deliveries**, us-east-1 | Four resources that are permanently in us-east-1 whatever region the environment uses | **`[]` / `[]` / `[]`** |
+| 8 | ACM certificates in us-east-1 left `PENDING_VALIDATION`, and the validation record in your hosted zone | Section 7 — reachable only on the custom-domain path, which nothing here has applied | **none from this repository** |
+| 9 | Site buckets, by name | — | **404 on all three** |
+| 10 | Tag inventory for `Project` and `Env`, **in both regions** | The assertion the end-to-end workflow will make | **empty, all four queries** |
+| 11 | A stranded `.tflock` in the state bucket | Section 5.2 | **none** |
 
 Every distribution this step created was confirmed individually as `NoSuchDistribution` rather
 than inferred from an exit code. That is the standard the checklist is written to: **checked and
 clean**, not "no known issues".
 
-### 6.1 The two commands the checklist cannot be written without
+### 6.1 The three commands the checklist cannot be written without
 
 ```bash
 aws cloudfront list-cache-policies            --type custom \
   --query 'length(CachePolicyList.Items || `[]`)' --output text
 aws cloudfront list-response-headers-policies --type custom \
   --query 'length(ResponseHeadersPolicyList.Items || `[]`)' --output text
+aws cloudfront list-functions \
+  --query "FunctionList.Items[?starts_with(Name, '<name_prefix>-site-')].Name" \
+  --output text
 ```
 
-Both must read `0` on an account whose environments are all destroyed. This is the only
-automatic detector for the tightest quota in the repository: 20 custom policies of each type per
-account, account-wide rather than per distribution, and this module creates two of each per
-environment — `<name_prefix>-site-<env>-default-*` and `<name_prefix>-site-<env>-assets-*`. Two
-environments therefore hold 4 of 20 in each quota at any time. A handful of leaked destroys
-reaches the ceiling, and the failure then surfaces at **apply** time on an unrelated environment,
-as a quota error naming nothing about the leak that caused it. The policy names are stable and
-carry the environment for exactly this reason: a leak that survives becomes a loud name collision
-on the next apply of that environment rather than silent accumulation.
+The first two must read `0` on an account whose environments are all destroyed, and the third must
+print nothing. The first two are the only automatic detector for the tightest quota in the
+repository: 20 custom policies of each type per account, account-wide rather than per
+distribution, and this module creates two of each per environment —
+`<name_prefix>-site-<env>-default-*` and `<name_prefix>-site-<env>-assets-*`. Two environments
+therefore hold 4 of 20 in each quota at any time. A handful of leaked destroys reaches the
+ceiling, and the failure then surfaces at **apply** time on an unrelated environment, as a quota
+error naming nothing about the leak that caused it. The policy names are stable and carry the
+environment for exactly this reason: a leak that survives becomes a loud name collision on the
+next apply of that environment rather than silent accumulation.
 
 `--type custom` is not optional. Without it the call returns AWS's managed policies as well and
 the count is never zero.
 
+The third command is here for a different reason and it is worth being clear about which. The
+viewer-request function the module attaches to the default cache behaviour is on a quota of 100
+per account rather than 20, so it is not what will bite first — but it is untaggable, exactly as
+the policies and the origin access control are, so no tag query in this repository can see one
+that leaked. Its name carries the bucket's random suffix, which means a leak also collides with
+nothing on the next apply: unlike the policies, it has no loud failure waiting for it. A sweep by
+name prefix is the only thing that finds it, which is why this command is filtered by prefix
+rather than counted. No `--stage` filter: a function this module leaves behind exists in both
+stages, and a filter is one more way for a sweep to look past the thing it is for.
+
 ### 6.2 What a tag-based assertion can and cannot see
 
 Tags are the obvious way to assert a clean teardown, and on this module they cover **6 of 17
-resources**. Measured, per environment:
+resources**. Measured, per environment, on 2026-08-27 — before the viewer-request function was
+added, which makes the environment 18 resources and the untagged half larger by one without
+moving either number below:
 
 | Query | Resources returned |
 |---|---|
@@ -386,11 +406,13 @@ confirms:
   environment's region returns one resource; five live us-east-1 resources are outside it,
   because CloudFront's logging API must be called in us-east-1 whatever region the environment
   uses. Any teardown assertion has to query both regions.
-- **The four quota-bearing policies and the origin access control are invisible in both
-  regions.** `aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy` and
-  `aws_cloudfront_origin_access_control` expose no tags — the CloudFront API has nowhere to put
-  them — and the resource groups tagging API returns only taggable resources. This is not
-  fixable by tagging harder. It is why section 6.1 exists.
+- **The four quota-bearing policies, the origin access control and the viewer-request function
+  are invisible in both regions.** `aws_cloudfront_cache_policy`,
+  `aws_cloudfront_response_headers_policy`, `aws_cloudfront_origin_access_control` and
+  `aws_cloudfront_function` expose no tags — the CloudFront API has nowhere to put them, and for
+  the function AWS says so outright: "You can't add tags to edge functions" — and the resource
+  groups tagging API returns only taggable resources. This is not fixable by tagging harder. It
+  is why section 6.1 exists.
 
 ### 6.3 The account may not be only yours
 
@@ -553,7 +575,8 @@ a wrong one.
 
 **An exit code is not evidence.** Run section 6, both regions, and run section 6.1 in
 particular — the two quota-bearing policy types are invisible to every tag-based assertion in
-this repository and are the tightest limit in it.
+this repository and are the tightest limit in it, and the origin access control and the
+viewer-request function are invisible in the same way on looser quotas.
 
 **An interrupted destroy is recoverable and costs nothing.** `force-unlock` with the id from the
 error, then re-run `destroy` with no special flags. Do not read the state file to work out what

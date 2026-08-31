@@ -33,7 +33,9 @@
 # aws_cloudfront_cache_policy and aws_cloudfront_response_headers_policy expose
 # no `tags` argument and no `tags_all` attribute — not omitted here, absent from
 # the provider schema, because the CloudFront API has nowhere to put them. The
-# origin access control in cloudfront.tf is the same.
+# origin access control and the viewer-request function in cloudfront.tf are the
+# same, the second of them by an AWS statement rather than by inference: "You
+# can't add tags to edge functions".
 #
 # That has a consequence which is not local to this file. The end-to-end
 # workflow proves a teardown was complete by asking the resource groups tagging
@@ -80,8 +82,15 @@ locals {
   # characters, so the cap is not a live constraint — but it does permanently
   # foreclose a hash-based policy, where every 'sha256-...' source costs about
   # 64 characters and a few dozen inline scripts would exhaust it. The
-  # documented escape is a viewer-response CloudFront Function, which has no
-  # such cap and which this module deliberately does not need.
+  # documented escape is a CloudFront Function on the *viewer-response* event,
+  # which writes the header in code and is bound by no header-value quota.
+  #
+  # That is not the viewer-request function cloudfront.tf now attaches, and the
+  # distinction is worth keeping straight now that this module has one at all:
+  # a viewer-request function runs before the origin is consulted and rewrites
+  # the URI, and could not set a response header if it wanted to. The escape
+  # described here would be a second function, on the other event, and this
+  # module deliberately does not need it.
   #
   # The second is not a size limit at all: multiple policies intersect, they
   # never override (CSP3 section 8.1). An application served by this

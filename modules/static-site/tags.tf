@@ -5,17 +5,19 @@
 # mechanism the environment roots use, and keeping it the only one means there
 # is never a second place tags can come from and disagree.
 #
-# The qualification is not pedantic and it bounds everything below. Four of the
+# The qualification is not pedantic and it bounds everything below. Five of the
 # resource types here accept no tags at all — the two CloudFront policy types in
-# policies.tf, the origin access control in cloudfront.tf, and the certificate
-# validation record in certificate.tf, none of which expose `tags` or `tags_all`
-# in the provider schema, because neither the CloudFront API nor a Route 53
-# resource record set has anywhere to put them. The precondition in this file
+# policies.tf, the origin access control and the viewer-request function in
+# cloudfront.tf, and the certificate validation record in certificate.tf, none of
+# which expose `tags` or `tags_all` in the provider schema, because neither the
+# CloudFront API nor a Route 53 resource record set has anywhere to put them.
+# AWS states the CloudFront half outright: "You can't add tags to edge
+# functions". The precondition in this file
 # therefore guarantees that everything *taggable* is tagged, which is a narrower
 # claim than it looks and is the strongest one available. policies.tf carries
 # what that costs the teardown assertion and which detectors are left.
 #
-# The validation record is the least dangerous of the four and the only one that
+# The validation record is the least dangerous of the five and the only one that
 # is not quota-bearing: it lives in a zone this module does not own, it is
 # created only on the custom-domain path that no environment here uses, and
 # `allow_overwrite` on it means a copy stranded by a failed cycle is corrected by

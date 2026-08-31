@@ -232,15 +232,18 @@ env:
   # An object written under `/assets/` so the asset cache behaviour has
   # something real to serve.
   #
-  # The module seeds `index.html` and nothing else, so without this the only
-  # available `/assets/*` response would be an error response — which is exactly
-  # the confusion the assertion further down exists to detect, and asserting the
-  # asset caching against it would be asserting nothing. Uploading a byte of
-  # JavaScript costs one `aws s3 cp` with a credential already in hand, into a
-  # bucket that is destroyed minutes later. It is not a Terraform resource, so
-  # nothing plans it and nothing reads it back as drift; `force_destroy = true`
-  # on this environment removes it with the bucket, which is the same property
-  # the app repository's own deploys rely on.
+  # The module seeds `index.html` and nothing else, so without this every
+  # request under `/assets/*` would be a request for a key that is not there.
+  # The caching assertion below would then be reading headers off the origin's
+  # 403 rather than off an object — and whether the assets response headers
+  # policy reaches a forwarded 403 at all is an open question in the module
+  # README, so the assertion would rest on something this repository has not
+  # established. Uploading a byte of JavaScript costs one `aws s3 cp` with a
+  # credential already in hand, into a bucket that is destroyed minutes later.
+  # It is not a Terraform resource, so nothing plans it and nothing reads it
+  # back as drift; `force_destroy = true` on this environment removes it with
+  # the bucket, which is the same property the app repository's own deploys
+  # rely on.
   #
   # It is uploaded with no `Cache-Control` of its own, on purpose: that is what
   # the documented deploy sequence does, and the header this workflow then
@@ -624,12 +627,25 @@ jobs:
             *) printf 'ok    HSTS does not request preload\n' ;;
           esac
 
-          # 3. A deep link: no such key exists in the bucket, and the SPA has to
-          # get the document anyway. This is the assertion the single-page
-          # routing design lives or dies by.
+          # 3. A deep link: no such key exists in the bucket, and the viewer has
+          # to get the document anyway. This is one half of what the
+          # viewer-request function does — the half that also worked under the
+          # error-response design it replaced — and it is here to show that
+          # closing the other half did not cost it. `/projects/x` names no file,
+          # so the function rewrites it to `/index.html`; the rewrite does not
+          # change which cache behaviour serves the response, so it comes back
+          # under the document's policies rather than the assets ones.
           echo "--- GET /projects/x"
           status="$(fetch /projects/x)"
           check "a deep link returns 200" "$status" "200"
+
+          # The second half of the sentence above, asserted rather than
+          # asserted-by-comment. A rewritten URI does not change the cache
+          # behaviour that serves it, so a deep link has to come back under the
+          # document's policies; if the function were ever moved to or copied
+          # onto /assets/*, this is the header that would change first.
+          check "a deep link is served under the document's policies" \
+            "$(header cache-control)" "no-cache"
 
           # 4. The asset behaviour, against the object seeded above.
           echo "--- GET /${PROBE_ASSET_KEY}"
@@ -640,42 +656,91 @@ jobs:
 
           # 5. A missing asset, which is the assertion with teeth.
           #
-          # CloudFront's CustomErrorResponses is defined once per distribution
-          # and applies to every cache behaviour — it cannot be scoped to the
-          # default one — so a 403 for a missing hashed chunk under /assets/ is
-          # answered with 200 and the body of index.html: HTML where the browser
-          # expects JavaScript. The browser throws a parse error, monitoring
-          # sees a healthy 200, and the failure is close to undiagnosable. It is
-          # the standard trap of the error-response SPA pattern and it is
-          # exactly what a partial deploy produces.
+          # This is the assertion that failed on 2026-08-31 (run 33407227330)
+          # and produced the design it now guards. Under the error-response
+          # pattern it replaced, `CustomErrorResponses` was defined once per
+          # distribution and applied to every cache behaviour — it could not be
+          # scoped to the default one — so a missing hashed chunk under
+          # /assets/ came back as `200` with `content-type: text/html`: the
+          # application document, where the browser expects JavaScript. A parse
+          # error in the console, a healthy 200 in monitoring, and a failure
+          # that is close to undiagnosable.
           #
-          # No plan-time test can see this. Only a live request to a missing key
-          # can, and this is the first workflow in the repository that makes
-          # one.
+          # What has to happen now is the origin's own refusal, forwarded
+          # untouched. The bucket policy grants `s3:GetObject` without
+          # `s3:ListBucket`, so S3 withholds key-existence information from a
+          # caller that may not enumerate and answers a missing key with 403
+          # rather than 404; with no error mapping left to intercept it,
+          # CloudFront hands that 403 to the viewer. The status is asserted
+          # exactly, and every other outcome is failed on its own arm, because
+          # they fail for unrelated reasons and one "not 403" message would send
+          # the reader looking in the wrong place.
+          #
+          # 404 gets an arm of its own for the same reason, and it is the one
+          # judgement call here. It is not a defect for a viewer — a missing
+          # file 404s, which is what a browser expects — but it means the origin
+          # has started answering with key-existence information, which happens
+          # only if the bucket policy gains `s3:ListBucket`. s3.tf argues that
+          # grant's absence at length; if it ever changes, this assertion should
+          # be changed deliberately alongside it rather than pass quietly over
+          # it. The previous form of this check tolerated a non-HTML 200 for a
+          # comparable reason, and that tolerance existed because the gap was
+          # known. There is no gap left to tolerate.
           echo "--- GET /assets/does-not-exist.js"
           status="$(fetch /assets/does-not-exist.js)"
           content_type="$(header content-type)"
+          cache_control="$(header cache-control)"
           echo "      status: ${status}, content-type: ${content_type:-<absent>}"
-          if [ "$status" = "000" ]; then
-            # Written out rather than folded into the arm below, because "no
-            # response" must not read as "not the SPA document".
-            fail "the request for /assets/does-not-exist.js got no response at" \
-              "all, so this assertion checked nothing"
-          elif [ "$status" = "200" ]; then
-            case "$content_type" in
-              text/html*)
-                fail "a missing asset returned 200 with content-type" \
-                  "${content_type}: /assets/* is being answered with the SPA" \
-                  "document, so a missing hashed chunk reaches the browser as" \
-                  "HTML under a healthy status"
-                ;;
-              *)
-                printf 'ok    a missing asset returns 200 but not the SPA document\n'
-                ;;
-            esac
-          else
-            printf 'ok    a missing asset returns %s rather than the SPA document\n' "$status"
-          fi
+
+          # Recorded, never asserted. Whether a response headers policy's
+          # headers survive a 403 forwarded from the origin is an open question
+          # in the module README, and this is the only request this repository
+          # makes that can show the answer. Printing it makes the answer
+          # readable in the log; asserting on it would be inventing a contract
+          # out of one observation.
+          echo "      cache-control: ${cache_control:-<absent>}"
+
+          case "$status" in
+            403)
+              printf 'ok    a missing asset returns the origin refusal, not the document\n'
+              ;;
+            000)
+              # Written out rather than folded into an arm below, because "no
+              # response" must not read as "not the document".
+              fail "the request for /assets/does-not-exist.js got no response at" \
+                "all, so this assertion checked nothing"
+              ;;
+            200)
+              case "$content_type" in
+                text/html*)
+                  fail "a missing asset returned 200 with content-type" \
+                    "${content_type}: /assets/* is being answered with the" \
+                    "application document, so a missing hashed chunk reaches the" \
+                    "browser as HTML under a healthy status. This is the exact" \
+                    "failure the viewer-request function replaced the error" \
+                    "responses to close, and it is back"
+                  ;;
+                *)
+                  fail "a missing asset returned 200 with content-type" \
+                    "${content_type:-<absent>}: the key is not in the bucket, so" \
+                    "no answer to this request can legitimately be a success"
+                  ;;
+              esac
+              ;;
+            404)
+              fail "a missing asset returned 404 rather than the origin's 403." \
+                "That is not wrong for a viewer and it is a failure here: it" \
+                "means the origin now discloses key existence, which happens" \
+                "when the bucket policy gains s3:ListBucket. s3.tf argues for" \
+                "that grant's absence — change this assertion with it, on" \
+                "purpose, or restore the grant"
+              ;;
+            *)
+              fail "a missing asset returned ${status}, which is neither the" \
+                "origin 403 this design expects nor a status this assertion" \
+                "knows how to read"
+              ;;
+          esac
 
           echo
           if [ "$failures" -gt 0 ]; then
@@ -735,12 +800,15 @@ jobs:
       # what envs/stage/outputs.tf publishes `access_log_group_name` for.
       #
       # What none of this can see is named rather than glossed: CloudFront cache
-      # policies, response headers policies and origin access controls expose no
-      # tags at all, so a leak of the two quota-bearing policy types is
-      # invisible to every assertion here. They are covered by the state
-      # assertion in every failure mode this workflow can produce — a destroy
-      # that leaves them behind leaves them in state — and by the manual
-      # detector in docs/TEARDOWN.md section 6.1 otherwise.
+      # policies, response headers policies, origin access controls and the
+      # viewer-request function expose no tags at all — "you can't add tags to
+      # edge functions" is AWS's own wording for the last of them, and the
+      # CloudFront API has nowhere to put them for the other three. So a leak of
+      # the two quota-bearing policy types, or of the function, is invisible to
+      # every assertion here. All of them are covered by the state assertion in
+      # every failure mode this workflow can produce — a destroy that leaves them
+      # behind leaves them in state — and by the manual detectors in
+      # docs/TEARDOWN.md section 6.1 otherwise.
       - name: Verify the teardown against AWS
         id: verify
         if: always()

@@ -195,25 +195,91 @@ run "no_custom_domain" {
 
   assert {
     condition     = aws_cloudfront_distribution.site.default_root_object == "index.html"
-    error_message = "The distribution must serve index.html for a request to \"/\". Without it CloudFront forwards a bucket-root request the OAC-private origin answers with a 403, and the homepage then works only by falling through the error mapping below."
+    error_message = "The distribution must serve index.html for a request to \"/\". Whether CloudFront substitutes the default root object before or after a viewer-request function runs is undocumented, so the root is made to work either way: this setting answers it if the substitution comes first, the function's rewrite answers it if the function does. Removing this leaves the root resting on the undocumented half alone."
   }
 
-  # SPA routing. Both codes, because an OAC-private bucket answers a missing key
-  # with 403 rather than 404, and a configuration mapping only 404 would map
-  # nothing at all.
+  # SPA routing, asserted as the absence of the mechanism that used to provide
+  # it. The 403 and 404 mappings were removed rather than left beneath the
+  # viewer-request function, because a viewer-request function cannot know
+  # whether a key exists: every request it declines to rewrite is a request for
+  # a file, and one that fell through to a 403 mapping would come back as
+  # index.html with a 200 — the exact trap the function exists to close.
+  #
+  # Written as a length rather than as a loop over the responses, and the
+  # difference is not stylistic. `alltrue([])` is `true`, so an assertion of the
+  # form "every custom error response satisfies X" passes vacuously the moment
+  # the block is gone, and would have gone on reporting green over the design it
+  # was written to check. A length is the only shape of this assertion that
+  # fails when the thing it describes comes back.
   assert {
-    condition     = toset([for response in aws_cloudfront_distribution.site.custom_error_response : response.error_code]) == toset([403, 404])
-    error_message = "The distribution must map exactly the 403 and 404 origin responses. 403 is the one an OAC-private bucket actually returns for a client-side route, so a mapping that covers only 404 covers nothing."
+    condition     = length(aws_cloudfront_distribution.site.custom_error_response) == 0
+    error_message = "The distribution must declare no custom error responses. CustomErrorResponses is defined once per distribution and applies to every cache behaviour, so any mapping that answers a deep link with the application shell answers a missing hashed asset with it too — 200 and HTML where the browser expects JavaScript."
   }
 
+  # And the mechanism that replaced them, on the behaviour it belongs to.
+  #
+  # The event type and the association's presence are both known at plan time;
+  # the function's ARN is not, and nothing here reads it. That is deliberate —
+  # an assertion comparing an unknown value is an error rather than a weak test,
+  # which the run block "cache_and_header_policies_reach_the_right_behaviours"
+  # below argues at length and works around with an override. No override is
+  # needed here: what a plan can see without one is that exactly one function
+  # runs on the viewer request to the default behaviour, and that is the whole
+  # of what this assertion claims.
   assert {
-    condition = alltrue([
-      for response in aws_cloudfront_distribution.site.custom_error_response :
-      response.response_code == 200 &&
-      response.response_page_path == "/index.html" &&
-      response.error_caching_min_ttl == 0
-    ])
-    error_message = "Each mapped error response must return the application shell with a 200 and no edge caching. Returning the origin's status would have search engines deindex every route the application defines, and caching it would keep serving the shell for a path that has since been uploaded."
+    condition     = [for association in aws_cloudfront_distribution.site.default_cache_behavior[0].function_association : association.event_type] == ["viewer-request"]
+    error_message = "The default cache behaviour must carry exactly one function association, on viewer-request. It is what turns a client-side route into a request for /index.html before CloudFront consults an origin that has no such key."
+  }
+
+  # The function's own three arguments. Each is called a decision where it is
+  # written, all three are literals a plan sees exactly as an apply would, and
+  # until this run block nothing checked any of them.
+  #
+  # `runtime` first, because it is the one that fails silently. A function
+  # flipped to cloudfront-js-1.0 plans, applies and serves this rewrite
+  # correctly — the body is ES 5.1 — and the loss surfaces years later as an
+  # edit that cannot use a language feature nobody knew was missing.
+  assert {
+    condition     = aws_cloudfront_function.spa_routing.runtime == "cloudfront-js-2.0"
+    error_message = "The viewer-request function must pin the cloudfront-js-2.0 runtime. 1.0 is what AWS keeps for functions written before 2.0 existed and what nearly every published copy of this rewrite still carries, so an unpinned or copied runtime is one nobody chose."
+  }
+
+  # `publish` fails the other way — loudly, but only at apply, and in the wrong
+  # place: only a function's LIVE stage may be associated with a behaviour, so
+  # the error names the distribution rather than this argument.
+  assert {
+    condition     = aws_cloudfront_function.spa_routing.publish
+    error_message = "The viewer-request function must be published. Only the LIVE stage of a function can be associated with a cache behaviour, so publish = false describes a function that exists and cannot be reached from the distribution that names it."
+  }
+
+  # And the one line of the body a plan can hold: the rewrite target. This
+  # asserts the shape this module chose over the shape AWS publishes —
+  # `request.uri = '/index.html'`, a constant, rather than `request.uri +=
+  # '/index.html'`, which appends. The appending form is correct for a
+  # generator emitting an index document per directory and is a 403 on every
+  # deep link for a build with one index.html at the root, which is exactly the
+  # edit a reader makes after finding AWS's url-rewrite-single-page-apps
+  # sample. Both halves are needed: the first alone passes on a body that
+  # assigns and then appends.
+  assert {
+    condition = (
+      strcontains(aws_cloudfront_function.spa_routing.code, "request.uri = '/index.html'")
+      && !strcontains(aws_cloudfront_function.spa_routing.code, "request.uri +=")
+    )
+    error_message = "The function must rewrite a route to the constant /index.html and must not append to the requested path. Appending is AWS's published single-page-app sample and it is written for a site with an index document in every directory; against a build with one index.html at the root it turns every deep link into a 403."
+  }
+
+  # The other half of that placement, and the one a reader is most likely to
+  # undo by making the function look like a distribution-wide setting.
+  #
+  # A function that changed the URI on the assets behaviour would not change
+  # which behaviour served the response, so an extensionless path under
+  # /assets/ would be answered with the application shell carrying the assets
+  # policies' `immutable` Cache-Control: a document every browser that saw it
+  # holds for a year, which no invalidation can reach.
+  assert {
+    condition     = length(aws_cloudfront_distribution.site.ordered_cache_behavior[0].function_association) == 0
+    error_message = "The /assets/* behaviour must carry no function association. Everything under it is a file, so a request for one that is not there has to reach the origin and come back refused rather than rewritten to the document."
   }
 
   # The default-certificate path, which is what makes this module applicable in
