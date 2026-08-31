@@ -99,9 +99,9 @@ variable "seed_placeholder" {
     servable before any application build is deployed to it. Defaults to true.
 
     Set it to false only where something else is guaranteed to have written that
-    key first. An empty bucket behind these custom error responses does not
-    serve an empty page — it serves the origin's 403, because the error response
-    cannot fetch the error page it is pointed at either.
+    key first. An empty bucket does not serve an empty page — it serves the
+    origin's 403, on every route rather than only on the homepage, because the
+    routing here answers a client-side route with that one missing document.
   EOT
   type        = bool
 

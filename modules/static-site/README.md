@@ -6,7 +6,9 @@ access logging delivered to CloudWatch Logs.
 ```
 viewer ──HTTPS──▶ CloudFront distribution ──OAC/SigV4──▶ S3 bucket (private)
                           │
-                          └─ standard logging (v2) ──▶ CloudWatch Logs group
+                          ├─ viewer-request function ─▶ a URI naming no file
+                          │                             becomes /index.html
+                          └─ standard logging (v2) ───▶ CloudWatch Logs group
 ```
 
 The bucket has no website configuration, no public read and no ACLs. The only
@@ -188,34 +190,52 @@ policy; and policies **intersect, never override** (CSP3 §8.1), so an
 application can only tighten this, never relax it. A `<meta http-equiv>` tag is
 not an escape hatch, and one silently ignores `frame-ancestors` anyway.
 
-## SPA routing is knowingly incomplete
+## SPA routing is decided at the edge, and it has one residual
 
-Deep links work: 403 and 404 from the origin are mapped to `/index.html` with a
-`200`, so a client-side route resolves in the browser. Both codes are mapped
-because an OAC bucket answers a missing key with 403, not 404 — the bucket policy
-grants `s3:GetObject` without `s3:ListBucket`.
+A CloudFront Function on **viewer-request** rewrites any URI whose **last path
+segment contains no dot** to the literal `/index.html`. `/projects/x` and
+`/about/` and `/` are routes and get the document; `/favicon.ico` is a file and
+is passed through untouched. The function is attached to the default cache
+behaviour only.
 
-**This also swallows missing assets.** `CustomErrorResponses` is defined once per
-distribution and cannot be scoped to one behaviour, so a request for a missing
-hashed chunk returns `200` carrying HTML where the browser expects JavaScript.
-The browser throws a parse error, monitoring sees a healthy `200`, and the
-failure is close to undiagnosable — which is exactly what a partial deploy
-produces.
+**It replaced `CustomErrorResponses`, and the removal is half the design.** The
+older and more widely published pattern maps the origin's 403 and 404 to
+`/index.html` with a `200`. That mapping is defined once per distribution and
+cannot be scoped to one behaviour, so a request for a missing hashed chunk came
+back as `200` carrying HTML where the browser expects JavaScript: a parse error
+in the console, a healthy `200` in monitoring, and a failure that is close to
+undiagnosable. It was carried here deliberately, with the gap documented, until
+the end-to-end workflow made a live request and showed it — `GET
+/assets/does-not-exist.js` → `200`, `content-type: text/html`, on 2026-08-31.
 
-It is left this way deliberately. No plan-time test can observe it; only a live
-request for a missing key can, and the end-to-end workflow is the first thing in
-this repository that makes one. The commit after that demonstration replaces
-both mappings with a viewer-request function, which is the only mechanism that
-can tell a route from an asset before the origin is consulted.
+Keeping both would have preserved exactly that. A viewer-request function cannot
+know whether a key exists, so every request it declines to rewrite is a request
+for a file — and with the mapping still underneath, a missing one would still
+have come back as the document with a `200`. The two mechanisms do not compose.
+A missing asset now reaches the origin and comes back as its real `403` — which
+is what the end-to-end workflow asserts, exactly, on every run.
+
+**The residual: a route whose last segment contains a dot.** `/users/jane.doe`
+is read as a file, is not rewritten, and reaches the viewer as a `403` rather
+than as the application. Nothing at the edge can distinguish that route from a
+request for a file of that name, so an application served by this module must
+avoid dots in the final segment of a route. The rule reads the URI in the form
+CloudFront delivers it, which is percent-encoded and not decoded first, so
+`/users/jane%2Edoe` carries no `.` and *is* rewritten — a difference the rule
+cannot see, recorded as a fact about what it tests rather than offered as a
+workaround. The alternative — an allowlist of
+known extensions — is rejected because it fails in the dangerous direction: an
+extension nobody listed turns a *missing file* back into a `200` carrying HTML,
+which is the defect this design exists to remove.
 
 ## A placeholder is seeded by default
 
 `seed_placeholder` (default `true`) writes a minimal `index.html` so the site is
-servable the moment it is applied. Without it the failure is not a blank page:
-`/` resolves to a key that does not exist, the origin returns 403, and the error
-response cannot fetch its own error page either — so CloudFront hands the viewer
-the original error, and every smoke-test assertion fails against infrastructure
-that is in fact correct.
+servable the moment it is applied. Without it the failure is not a blank page,
+and it is not confined to the homepage: `/` resolves to a key that does not
+exist and the origin returns 403, and because every client-side route is
+rewritten to that same key, every route fails identically. Every smoke-test
+assertion then fails against infrastructure that is in fact correct.
 
 Its content and etag are ignored after creation, so an application deploy is
 never reverted by the next `terraform apply`.
@@ -302,8 +322,12 @@ What it holds:
 
 - the bucket is private in all five ways it can stop being — the four public
   access block settings, and ACLs disabled outright by `BucketOwnerEnforced`
-- both the 403 and the 404 origin response map to `/index.html` with a 200 and
-  no edge caching, and `default_root_object` is `index.html`
+- the distribution declares **no** custom error responses, the viewer-request
+  function is attached to the default behaviour and to nothing else, and
+  `default_root_object` is `index.html`. The first of those is asserted as a
+  length rather than as a loop over the responses, because `alltrue([])` is
+  `true` and a loop would have passed vacuously over the design it was written
+  to check
 - each cache behaviour carries the cache policy and the response headers policy
   meant for it, `/assets/*` included. The two are built from one map so the
   security headers cannot drift apart; this is what checks the other end of
@@ -318,15 +342,21 @@ What it holds:
 - the certificate is requested through `aws.us_east_1` and the bucket is not,
   which is the one part of the custom-domain path a plan can genuinely catch
 
-What it cannot: anything a live request answers. The SPA mapping's known gap
-above, whether a response headers policy's headers survive a forwarded S3 403,
-DNS validation — none of these has a plan-time shadow, and the end-to-end
-workflow is the first thing here that makes a real request.
+What it cannot: anything a live request answers. Whether the rewrite rule sorts
+real URIs the way it claims to, whether a missing asset really comes back as the
+origin's `403`, whether a response headers policy's headers survive that
+forwarded 403, DNS validation — none of these has a plan-time shadow. A plan can
+see that the function is attached and cannot run a line of it. The end-to-end
+workflow is what makes the real request.
 
 ## What this module does not do yet
 
 - **The cross-repository contract.** The SSM parameters the app repository reads,
   and the scoped OIDC deploy role it assumes, arrive with the contract phase.
+- **Routes with a dot in their last path segment.** They are served the origin's
+  `403` rather than the application, for the reason the routing section above
+  gives. It is a limitation of the rule, not an oversight, and closing it would
+  mean an extension allowlist that fails the other way.
 
 ## Accepted findings
 
@@ -380,6 +410,7 @@ make docs-check  # what CI runs; fails instead of rewriting
 | [aws_acm_certificate_validation.site](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/acm_certificate_validation) | resource |
 | [aws_cloudfront_cache_policy.site](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_cache_policy) | resource |
 | [aws_cloudfront_distribution.site](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_distribution) | resource |
+| [aws_cloudfront_function.spa_routing](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_function) | resource |
 | [aws_cloudfront_origin_access_control.site](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_origin_access_control) | resource |
 | [aws_cloudfront_response_headers_policy.site](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_response_headers_policy) | resource |
 | [aws_cloudwatch_log_delivery.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_delivery) | resource |
@@ -409,7 +440,7 @@ make docs-check  # what CI runs; fails instead of rewriting
 | force\_destroy | Whether `terraform destroy` may delete the site bucket while it still holds<br/>objects. Defaults to false, which is the correct value for any environment<br/>whose contents are worth more than the convenience of tearing it down.<br/><br/>Every environment in this repository sets it to true, because every<br/>environment here is ephemeral and a bucket the app repository has deployed<br/>into refuses to delete otherwise. That is a property of this operating model,<br/>not of the module, which is exactly why it is a variable. | `bool` | `false` | no |
 | hosted\_zone\_id | Id of the Route 53 public hosted zone holding domain\_name, when this module<br/>should request and validate the certificate itself. Requires that the zone<br/>lives in the same AWS account.<br/><br/>Leave null and set acm\_certificate\_arn instead when the domain's DNS is<br/>anywhere else — a registrar's nameservers, another provider, another account. | `string` | `null` | no |
 | log\_retention\_days | How long CloudFront access logs are retained in CloudWatch Logs. Applies to the log group this module creates; the log group is destroyed with the environment, so this bounds a window that in practice closes far sooner. | `number` | `30` | no |
-| seed\_placeholder | Whether to seed the bucket with a placeholder `index.html` so the site is<br/>servable before any application build is deployed to it. Defaults to true.<br/><br/>Set it to false only where something else is guaranteed to have written that<br/>key first. An empty bucket behind these custom error responses does not<br/>serve an empty page — it serves the origin's 403, because the error response<br/>cannot fetch the error page it is pointed at either. | `bool` | `true` | no |
+| seed\_placeholder | Whether to seed the bucket with a placeholder `index.html` so the site is<br/>servable before any application build is deployed to it. Defaults to true.<br/><br/>Set it to false only where something else is guaranteed to have written that<br/>key first. An empty bucket does not serve an empty page — it serves the<br/>origin's 403, on every route rather than only on the homepage, because the<br/>routing here answers a client-side route with that one missing document. | `bool` | `true` | no |
 
 ## Outputs
 
