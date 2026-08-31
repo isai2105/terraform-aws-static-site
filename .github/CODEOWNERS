@@ -1,0 +1,183 @@
+# Who owns what in this repository, and a record of what that ownership does
+# and does not cause.
+#
+# It is not a merge gate and does not become one by existing. "Require review
+# from Code Owners" is off in the `protect-main` ruleset —
+# `require_code_owner_review: false`, read from the API on 2026-08-31 — and
+# docs/BOOTSTRAP.md section 7.2 holds the argument for why that setting and
+# the required approving review beside it both stay off on a repository with
+# one maintainer. That argument is stated once, there, and is not repeated
+# here.
+#
+# Placement is load-bearing. GitHub reads `.github/`, then the repository
+# root, then `docs/`, and uses the first of those it finds. This file is in
+# `.github/`, which is both first in that order and the location GitHub's own
+# hardening guidance names. The part worth writing down is that this
+# repository has a `docs/` directory: a `docs/CODEOWNERS` added later would be
+# shadowed by this one and would be silently dead, with no error raised
+# anywhere. There is none today.
+#
+# ---------------------------------------------------------------------------
+# What this file never does: request a review from the maintainer
+# ---------------------------------------------------------------------------
+#
+# **GitHub does not request a review from the author of a pull request, even
+# when that author is the code owner.** On a repository where every pull
+# request opened to date — 41 of them, as of 2026-08-31 — was opened by the
+# single account named below, that is most of what there is to say about this
+# file's day-to-day effect.
+#
+# GitHub's documentation does not say it, which is why what follows is
+# measurement and not a citation: as of 2026-08-31 the 178 lines of
+# `about-code-owners.md` never address the author-as-owner case at all.
+# Measured the same day against the REST API: 800 pull requests across eight
+# large public repositories, zero self-requests. Two of them name individual
+# users rather than teams — aquasecurity/trivy and gruntwork-io/terragrunt —
+# and both show the control symmetrically, which is what rules out "these
+# owners are simply never requested": owner A's pull requests request only
+# owner B, owner B's request only owner A, and neither is ever requested on
+# its own.
+#
+# The four owner-authored pull requests in that set that carried no request at
+# all were predicted to be drafts before they were looked at, and were. That
+# is the one part of the model GitHub does document — code owners are not
+# automatically requested to review draft pull requests. The whole model is
+# three lines: a non-draft pull request requests every owner except its
+# author, a draft requests nobody, and the author is never requested.
+#
+# ---------------------------------------------------------------------------
+# Where it does operate: Dependabot's pull requests
+# ---------------------------------------------------------------------------
+#
+# The reading that follows from the section above is that this file is inert
+# until a second maintainer arrives. That reading is wrong, and what makes it
+# wrong is already committed: .github/dependabot.yml, added in 76f3320 on
+# 2026-08-31, proposes GitHub Actions bumps weekly on Tuesdays.
+#
+# A Dependabot pull request is authored by `dependabot[bot]`, which is not the
+# owner below, so the rule that exempts an author does not reach it. Measured
+# in the same two control repositories — neither of whose Dependabot
+# configurations sets `reviewers:` or `assignees:`, which is what leaves code
+# owners as the only thing that could be doing it — every
+# `dependabot[bot]`-authored pull request examined requested review from every
+# code owner: 4 of 4 in the first, replicated in the second.
+#
+# So the accurate statement is neither "it drives review requests" nor "it
+# does nothing until there is a second maintainer". It drives requests on pull
+# requests opened by somebody other than the owner, which on this repository
+# means Dependabot's — from the first weekly run, since no Dependabot pull
+# request has been opened yet — and any outside contributor's.
+#
+# **That weekly request is kept rather than suppressed**, and it could be
+# suppressed. An empty owner list is legal and removes ownership for the
+# pattern it follows, so a `.github/workflows/` line with nothing after it
+# would silence exactly those requests and leave the rest of the tree owned.
+# What that costs is the file. `.github/workflows/` is where the apply roles
+# are assumed, and while .github/dependabot.yml names only the
+# `github-actions` ecosystem it is the only part of the tree a Dependabot
+# pull request touches — disowning it to avoid one notification a week would
+# leave a CODEOWNERS whose every remaining effect is one of the passive ones
+# below, which is the "off switch with extra steps" shape section 7.2 turns
+# down. The request is also the only recurring evidence that the handle below
+# still resolves: a signal somebody has to be watching for rather than a
+# check, but one that costs nothing to keep.
+#
+# ---------------------------------------------------------------------------
+# What it does on the pull requests where it requests nobody
+# ---------------------------------------------------------------------------
+#
+# Four things, none of them a gate, and together they are why this file is
+# worth having on a repository where it will request review from nobody on
+# almost every pull request:
+#
+#   - file and directory views on github.com carry an ownership shield with
+#     the owner in its tooltip, which answers "who do I ask about this" in
+#     the place the question gets asked;
+#   - a pull request's compare view previews which code owners the pull
+#     request will request, before it is opened;
+#   - syntax errors in this file are highlighted inline when it is viewed on
+#     github.com, and are machine-readable at
+#     `GET /repos/{owner}/{repo}/codeowners/errors` — see the block below;
+#   - it arms `require_code_owner_review`, which is the setting section 7.2
+#     turns on the day the argument for leaving it off stops holding. Without
+#     a CODEOWNERS that setting has nothing to enforce.
+#
+# ---------------------------------------------------------------------------
+# The owner
+# ---------------------------------------------------------------------------
+#
+# One pattern, and it is the whole repository. `*` matches every file at every
+# depth, so ownership is total and there is no unowned corner for a later
+# pattern to have to remember. Order matters in a CODEOWNERS — the last
+# matching pattern wins, not the most specific one — which is a rule with
+# nothing to trip over while there is one line.
+#
+# The handle is the real account this repository is developed in rather than a
+# placeholder, for the reason bootstrap/terraform.tfvars writes out its
+# `name_prefix`: a `<owner>` written here would be a file that resolves to
+# nobody, does nothing, and reports no error while doing it. A GitHub handle
+# is not among the things this repository launders — docs/BOOTSTRAP.md scopes
+# that to account ids, ARNs and bucket names, all of which differ per cloner
+# and one of which is the likeliest leak in the project — and `isai2105` is
+# already written out in bootstrap/terraform.tfvars, in both environments'
+# terraform.tfvars and in .github/workflows/provider-lock-refresh.yml. A
+# cloner replaces this line and nothing else.
+#
+# **Nothing in this tree can be read to tell whether the handle on the right
+# resolves** — only GitHub holds that — and the failure is silent by
+# construction: GitHub skips a line naming a user who does not exist or lacks
+# write access, assigns no owner, and raises no error, no annotation and no
+# check run. That is the
+# shape of rule 2 in .github/workflows/validate.yml, an obligation held by
+# nobody, and it is not left that way here. The `audit-online` job in that
+# file reads `codeowners/errors` at the pull request's own ref on every pull
+# request. It catches a handle that stopped resolving, and it catches a
+# cloner's typo on their first pull request rather than months later.
+#
+# What that check does not cover is measured rather than assumed. The endpoint
+# reports unknown owners and misses invalid *patterns* entirely — reproduced
+# 2026-08-31 against a file whose `!negated` line the web UI flags as "Invalid
+# pattern on line 8" and the API does not mention. With one pattern, and that
+# pattern `*`, there is nothing here for it to miss today. The commit that
+# adds a second pattern is the commit that makes the gap real.
+* @isai2105
+
+# ---------------------------------------------------------------------------
+# Decisions not taken
+# ---------------------------------------------------------------------------
+#
+# Per-path ownership lines are deliberately absent. `bootstrap/`, `envs/`,
+# `modules/static-site/`, `docs/` and `.github/workflows/` are real seams, and
+# a line each naming the same owner would be functionally identical to the
+# single `*` above under last-match-wins: the same output, five times the
+# file. The case for writing them anyway is anticipatory — they mark where a
+# future split goes, so handing an area over becomes a one-word edit.
+#
+# They are turned down on this repository's own rule, which
+# .github/dependabot.yml states twice, once against `open-pull-requests-limit`
+# and once against `prefix-development`: a line that does nothing today is a
+# line that can only be wrong. Five identical owners encode a distinction that
+# does not exist and read, to anyone scanning the file, as though they do
+# something. They are also unverifiable in a way `*` is not — a path that is
+# renamed or removed leaves a pattern that matches nothing, which is not a
+# syntax error and so is reported by neither the web UI nor
+# `codeowners/errors`. The split, when it comes, is
+# derived against the tree as it is then rather than against this one, and
+# re-deriving five lines is not the expensive part of it.
+#
+# A `@team` handle is not an option declined here so much as one that does not
+# exist. Team syntax is `@org/team-name`, teams exist only inside
+# organizations, and this repository is owned by a `User`. The neighbouring
+# constraint is worth writing down because it is invisible until it bites:
+# code owners are a feature of public repositories on GitHub Free, so making
+# this repository private would stop this file being read — no error, no
+# annotation, and every effect listed above gone at once.
+#
+# `require_code_owner_review` in the `protect-main` ruleset stays `false`, and
+# the argument for that is docs/BOOTSTRAP.md section 7.2 rather than these
+# lines, because it is the same argument that keeps a required approving
+# review off and the repository states a shared argument once. Section 7.2
+# also carries the payload that turns both on the day a second maintainer
+# exists. Adding this file changes nothing about that ruleset:
+# `required_approving_review_count` is 0 and `require_code_owner_review` is
+# false, before this commit and after it.
