@@ -616,16 +616,22 @@ rename or delete the label and nothing objects, the repository stays green for a
 teardowns keep working, and the run that discovers the label is gone is the run that needed the
 issue.
 
-## 8. A token for the scheduled provider-lock refresh *(not needed until that workflow exists)*
+## 8. A token for the scheduled provider-lock refresh
 
-Not required to bootstrap; required before the provider-lock refresh workflow is any use, and
-it belongs here with the rest of the platform setup.
+Not required to bootstrap; required for `.github/workflows/provider-lock-refresh.yml` to be
+any use, and it belongs here with the rest of the platform setup.
 
 That workflow opens a pull request, and it **must not** use the default `GITHUB_TOKEN`. GitHub
 raises no workflow events for actions taken with that token, so a pull request opened with it
 gets no `validate.yml` run and no `plan-gate` run — it reports on none of the checks `main`
 requires and is therefore blocked permanently, in a way that reads like the ruleset
 misbehaving rather than like the token it is.
+
+It bites harder on this particular pull request than the general rule suggests. The refresh
+touches `modules/static-site/.terraform.lock.hcl`, and `plan.yml`'s `detect` job treats any
+change under `modules/` as shared across environments — so it selects every environment and
+there is a real plan to run, against real state, with an OIDC role. `plan.yml` says why in the
+place it decides: *a provider bump is the last change that should land without a plan.*
 
 Create a fine-grained PAT or a GitHub App installation token scoped to this repository with
 `contents: write` and `pull-requests: write`, and store it as a repository secret:
@@ -634,9 +640,16 @@ Create a fine-grained PAT or a GitHub App installation token scoped to this repo
 gh secret set PROVIDER_LOCK_TOKEN
 ```
 
+**Until it is set, that workflow fails on its first step**, deliberately and before it spends
+ten minutes downloading providers: the run would otherwise compute five correct lock files and
+then fail to do the one thing it exists to do, on an authentication error naming nothing. A
+Tuesday-morning red check pointing at this section is the better half of that trade.
+
 Dependabot's own pull requests do not have this problem — they do trigger workflows — but they
 carry a read-only token with no access to repository secrets, which is the constraint that
-keeps the required check set credential-free.
+keeps the required check set credential-free. The `audit-online` job in `validate.yml` is the
+one job that does read a token, and it is not in the required set; the argument for that
+split is with the `audit-online` target in the `Makefile`.
 
 ## 9. Operations
 

@@ -156,12 +156,20 @@ jobs:
           # credential-free rather than by being skipped.
           #
           # That is an argument about `.github/`, not an exemption for bots. A
-          # pull request that changes modules/ — a provider constraint bumped
-          # by Dependabot's terraform ecosystem, say — is planned like any
-          # other, and if it was opened by an account that cannot mint an OIDC
-          # token it goes red rather than merging unplanned. Re-pushing it to a
-          # branch in this repository is the move, as it is for a fork below. A
+          # pull request that changes modules/ is planned like any other, and
+          # if it was opened by an account that cannot mint an OIDC token it
+          # goes red rather than merging unplanned. Re-pushing it to a branch
+          # in this repository is the move, as it is for a fork below. A
           # provider bump is the last change that should land without a plan.
+          #
+          # That last sentence is why .github/workflows/provider-lock-refresh.yml
+          # opens its pull request with PROVIDER_LOCK_TOKEN rather than with the
+          # default one: its diff touches modules/static-site/.terraform.lock.hcl,
+          # so this job selects every environment and there is a real plan to
+          # read. It is also part of why .github/dependabot.yml excludes the
+          # terraform ecosystem — a Dependabot pull request could not run that
+          # plan — though the decisive reason there is what a single-platform
+          # updater does to a lock file, and it is argued in that file.
           shared=false
           while IFS= read -r file; do
             case "$file" in

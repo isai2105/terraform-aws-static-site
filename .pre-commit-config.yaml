@@ -159,8 +159,11 @@ repos:
 
       # The lock files are a trigger too. `validate` runs `init` first, and
       # `init` resolves providers through .terraform.lock.hcl, so a commit that
-      # refreshes a lock and nothing else — which is exactly what a scheduled
-      # lock-refresh produces — changes what this target would say.
+      # refreshes a lock and nothing else still changes what this target would
+      # say. That commit is no longer hypothetical: it is what
+      # .github/workflows/provider-lock-refresh.yml opens whenever its weekly
+      # run finds a provider to move, and a maintainer pulling that branch to
+      # check it locally is the case this alternation covers.
       - id: terraform-validate
         name: terraform validate
         entry: make validate
@@ -282,11 +285,14 @@ repos:
   # measured rather than assumed, and it is why `action.yml` is matched at any
   # depth instead of only under `.github/`.
   #
-  # None of those extra files exists here, and matching them anyway is the whole
-  # point of the rule: the `action.yml` added outside `.github/` next year is
-  # exactly the one a trigger scoped to today's layout would send to GitHub
-  # unchecked. Applying that consistently is cheaper than deciding case by case
-  # which absent file is likely enough to be worth an alternation.
+  # The Dependabot configuration was one of those absent files when this trigger
+  # was written, and .github/dependabot.yml now exists — matched by the first
+  # alternation without anything here changing, which is the rule paying for
+  # itself rather than an argument for it. The `action.yml` added outside
+  # `.github/` next year is the same case still ahead: exactly the file a
+  # trigger scoped to today's layout would send to GitHub unchecked. Applying
+  # that consistently is cheaper than deciding case by case which absent file is
+  # likely enough to be worth an alternation.
   #
   # This file is one of the triggers too, which is not a formality: zizmor reads
   # it as an input in its own right, so a change here is a change to something

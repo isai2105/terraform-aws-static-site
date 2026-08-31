@@ -1,12 +1,20 @@
 # Validation that runs on every pull request.
 #
-# Eight jobs, none of which needs an AWS account, a role or a state bucket: the
+# Nine jobs, none of which needs an AWS account, a role or a state bucket: the
 # Terraform job runs `init -backend=false`, TFLint runs with the AWS ruleset's
 # deep-check rules off, Trivy and terraform-docs read the HCL statically, the
 # module tests configure their providers with credentials that cannot reach AWS,
-# and the other three never touch a cloud provider at all. That is what lets this
+# and the other four never touch a cloud provider at all. That is what lets this
 # gate land before the code it gates, and what keeps it fast enough to be a
 # required check.
+#
+# Eight of the nine are required checks in the branch ruleset. The ninth,
+# `audit-online`, is deliberately not one and cannot be: it needs a GitHub
+# token, and one of the audits it runs reports on an advisory database rather
+# than on this tree, so it can go red on a Tuesday without this repository
+# having changed. It runs here anyway, and where a reader of the Checks list
+# will ask why it is not required, the answer is with the `audit-online` target
+# in the Makefile and repeated in short beside the job below.
 #
 # ---------------------------------------------------------------------------
 # The hardening these workflow files share
@@ -34,7 +42,10 @@
 # Rule 1 is split, which is the one place this list is finer than it looks. That
 # a `uses:` is pinned at all is zizmor's; that the version comment beside the
 # pin is the tag it claims is `ref-version-mismatch`'s, and that audit does not
-# run offline — so it is `make audit-online`, by hand, when a pin moves.
+# run offline — so it is `make audit-online`, which the `audit-online` job below
+# runs on every pull request. The split is still worth writing out, because what
+# it costs is visible in the Checks list: rule 1's first half blocks a merge and
+# its second half goes red beside a merge button that still works.
 #
 # `actionlint` covers none of the six and is not the weaker linter for it: it
 # checks a workflow's syntax, its expressions and, through shellcheck, its `run:`
@@ -52,14 +63,16 @@
 #    comment. A tag can be moved, a commit cannot. The comment is not
 #    decoration: each SHA here was produced by dereferencing that tag through
 #    the GitHub API rather than copied out of a README, and it is what the next
-#    bump gets read against — including by Dependabot, which from commit 25 is
-#    the thing doing the bumping. One zizmor audit checks that pairing,
+#    bump gets read against — including by Dependabot, which is now the thing
+#    doing the bumping: .github/dependabot.yml, weekly, every action in one
+#    grouped pull request. One zizmor audit checks that pairing,
 #    `ref-version-mismatch`, and a second, `impostor-commit`, checks the
 #    narrower thing that the SHA belongs to the repository it is written
-#    against at all. Neither runs offline, so neither runs in the job below.
-#    **When a pin moves, run `make audit-online` before the diff leaves the
-#    branch.** The measurement behind that sentence is with the `audit` target
-#    in the Makefile.
+#    against at all. Neither runs offline, so neither runs in the `zizmor` job
+#    below. **The `audit-online` job below runs both, on every pull request**,
+#    which is where a moved pin arrives whether Dependabot moved it or a person
+#    did. The measurement behind that sentence is with the `audit` target in
+#    the Makefile.
 #
 # 2. Every pinned SHA declares `using: node24` in that action's own `action.yml`
 #    at that SHA — checked when the pin is written and again when it is bumped.
@@ -69,9 +82,19 @@
 #    perfectly right up to that date and then fails everywhere at once. Nothing
 #    about such a pin is malformed, so neither actionlint nor zizmor has a word
 #    to say about it — one of the three rules held by hand rather than by a
-#    tool, and the only one of them with a deadline. Of the seven actions used
-#    across these files, six are `node24`; `aquasecurity/setup-trivy` is a
+#    tool, and the only one of them with a deadline. Of the eight actions used
+#    across these files, seven are `node24`; `aquasecurity/setup-trivy` is a
 #    composite action and has no JavaScript runtime to pin.
+#
+#    What .github/dependabot.yml changes is not the rule but how often it comes
+#    due. The obligation used to arrive whenever somebody chose to bump a pin;
+#    it now arrives every Tuesday, on a pull request nobody planned, against a
+#    date that does not move. Nothing automates it — not zizmor at any persona
+#    in either mode, not actionlint, not `make audit-policy`, and not the
+#    `audit-online` job below, which reads the tag comment beside a SHA and has
+#    no opinion about the runtime declared at it. Opening `action.yml` at each
+#    proposed SHA is a person's job, weekly, until 23 September 2026 is behind
+#    this repository rather than ahead of it.
 #
 # 3. `permissions: {}` at workflow level, with the minimum granted per job. An
 #    empty block is not the same as no block: with no block at all every job
@@ -460,6 +483,100 @@ jobs:
 
       - name: Audit the workflows
         run: make audit
+
+  # The five audits `make audit` cannot run, on every pull request — and the one
+  # job in this file that is deliberately not a required check.
+  #
+  # It exists because rule 1 above is split and the second half had no
+  # enforcement at all. `ref-version-mismatch` compares a SHA pin against the
+  # `# vX.Y.Z` comment written beside it, and it does not run offline: measured
+  # at zizmor 1.29.0 on this repository, rewriting one `# v7.0.1` comment to
+  # `# v4.1.1` produces nothing from `make audit` and one medium
+  # `warning[ref-version-mismatch]` here, with `make audit-online` exiting 2.
+  # Until now the answer to that was a sentence asking a person to remember. It
+  # is now a job, which is the only form the answer can take once
+  # .github/dependabot.yml is opening the pull requests that move those pins.
+  #
+  # **A separate job, never a second step in `zizmor` above.** That job is a
+  # required check, and folding this into it would make a required check depend
+  # on a credential and on GitHub's advisory database — the two properties the
+  # `audit-online` target in the Makefile argues at length disqualify it from
+  # ever being a gate. One half of that argument is weaker than it was written:
+  # a Dependabot pull request's read-only token does satisfy this job, so "the
+  # required set is kept credential-free so bot pull requests can satisfy it"
+  # is not what rules this out. The other half is untouched and decides it on
+  # its own — `known-vulnerable-actions` reports on a database that moves
+  # without a commit, so a required check running it could take `main` red on a
+  # Tuesday with nothing in this repository having changed.
+  #
+  # Not required, and not `continue-on-error: true` either. That flag renders a
+  # failure as a green tick with an annotation beside it, which is the "green
+  # check nobody reads" shape this repository turns down everywhere else. A
+  # non-required job that fails shows a red cross in the Checks list while the
+  # merge button stays enabled: the reviewer sees it and decides, which is
+  # exactly the weight this check should carry.
+  #
+  # No `paths:` filter, and not out of laziness. A `paths:` at workflow level
+  # would apply to all nine jobs and stop the eight required ones reporting on
+  # any pull request that touches no workflow file — which leaves them
+  # "Expected — Waiting for status" forever, the trap `plan-gate` exists in
+  # plan.yml to disarm. A per-job filter would work and is still not worth it:
+  # this job costs about three seconds (measured, twice, at 2.8s and 2.2s), and
+  # running it unconditionally removes the whole class of bug where a path
+  # pattern and the files that actually matter drift apart. That is the
+  # argument plan.yml's `detect` job makes against `dorny/paths-filter`,
+  # applied here.
+  #
+  # The token is a rate limit lifted, not an authorisation granted. All five
+  # online audits are public reads — `ref-version-mismatch` and
+  # `impostor-commit` list refs on github.com, `known-vulnerable-actions` reads
+  # `api.github.com/advisories` — and none of them needs a permission this job
+  # could be given. It is the same property the `tflint` job above relies on
+  # and says so about: the rate limit is raised by the token being
+  # authenticated at all, not by anything it is allowed to reach. So the grant
+  # below stops at the `contents: read` the checkout needs.
+  audit-online:
+    name: audit-online
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned zizmor version
+        id: zizmor-version
+        # The same pin the `zizmor` job above reads, from the same place. Two
+        # jobs running two versions of the same binary against the same tree
+        # would be two answers with nothing to say which is current.
+        run: echo "version=$(make -s print-zizmor-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install zizmor
+        env:
+          VERSION: ${{ steps.zizmor-version.outputs.version }}
+        # Installed exactly as the `zizmor` job above installs it, down to the
+        # archive name and the missing checksum file, and the reasoning is
+        # written out there rather than repeated here.
+        run: |
+          workdir="$(mktemp -d)"
+          archive="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "${workdir}/${archive}" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${VERSION}/${archive}"
+          tar -xzf "${workdir}/${archive}" -C "${workdir}" zizmor
+          echo "${workdir}" >> "$GITHUB_PATH"
+
+      - name: Audit the workflows against the GitHub API
+        env:
+          # `make audit-online` refuses to run without one rather than letting
+          # zizmor fall back to offline and report a clean pass having skipped
+          # every audit this job exists for. On a pull request from a fork this
+          # is still issued and still read-only, which is all the target needs.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make audit-online
 
   # The pull request title becomes the subject of the squashed commit, so it is
   # checked with the same rigour as the code. Skipped on push, where there is

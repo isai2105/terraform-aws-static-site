@@ -608,8 +608,11 @@ test: check-terraform ## Run the module tests with `terraform test`.
 # .pre-commit-config.yaml from wherever they are, honouring .gitignore, so
 # pointing it at the repository root is what keeps this target covering the
 # files added after it was written — the discovery argument `validate`, `docs`
-# and `test` each make for their own targets, and the one that will matter when
-# commit 25 adds .github/dependabot.yml.
+# and `test` each make for their own targets, and the one that paid for itself
+# the moment .github/dependabot.yml arrived: that file is collected and audited
+# by this target with nothing here changed to admit it, which is also how the
+# `dependabot-cooldown` finding below reached a required check before anybody
+# went looking for it.
 #
 # `--offline` is the flag that needs defending, and the reason is not economy.
 # zizmor selects its mode from whether a GitHub token is in the environment, so
@@ -649,13 +652,22 @@ test: check-terraform ## Run the module tests with `terraform test`.
 # `warning[ref-version-mismatch]` at medium with a token in the environment.
 #
 # So the version comment beside every pin is checked by nothing this target
-# runs, and commit 25 is where that stops being hypothetical — Dependabot and
-# the scheduled lock refresh are the two mechanisms that rewrite SHA/comment
-# pairs, and a conflict resolved by taking the new SHA and keeping the old
-# comment is green here, green in CI and green under actionlint. `audit-online`
-# below is the check that catches it. The obligation until commit 25 automates
-# it is to run that target whenever a `uses:` pin moves, and it is written down
-# here and beside rule 1 in validate.yml rather than left to memory.
+# runs, and .github/dependabot.yml is what stopped that being hypothetical. It
+# looks weekly and opens a pull request whenever an action has moved, so
+# SHA/comment pairs are now rewritten without anybody choosing the moment —
+# and a bump that takes the new SHA while keeping the old comment is green
+# here, green under actionlint and green in every required check. `audit-online` below is what catches it — and it is no
+# longer a target somebody has to remember to type, because the `audit-online`
+# job in validate.yml runs it on every pull request, which is where a moved pin
+# arrives whether Dependabot moved it or a person did.
+#
+# .github/workflows/provider-lock-refresh.yml is the other automation added
+# alongside it, and it is deliberately *not* named above. Naming it would be
+# wrong in a way worth writing down rather than quietly fixing: that workflow
+# rewrites `.terraform.lock.hcl` and never touches a `uses:` line, so
+# `ref-version-mismatch` — the audit this whole section exists for — has
+# nothing to read in its diff. Dependabot moves action pins, the lock refresh
+# moves provider versions, and only the first is what this obligation is about.
 #
 # `audit-policy` runs first, as a prerequisite rather than as a second command
 # here, because a red target should name what broke. It carries the two rules of
@@ -663,22 +675,74 @@ test: check-terraform ## Run the module tests with `terraform test`.
 # at the top of validate.yml and again on that target below.
 #
 # The default `regular` persona, not `--pedantic` or `--persona=auditor`. Every
-# run prints `(4 suppressed)`, and those four are the whole of what the stricter
-# personas add here: one `concurrency-limits` against validate.yml, which needs
-# no concurrency group because no job in it takes a lock, and three
-# `undocumented-permissions` against the `id-token: write` lines in plan.yml and
-# apply.yml.
+# run prints a suppressed count, and that count is the whole of what the
+# stricter personas add here. Re-measured at v1.29.0 rather than carried
+# forward, because it had already gone stale once — `(9 suppressed)` as this is
+# written:
 #
-# The second set is not fixable in the direction it looks, which is measured at
-# v1.29.0 rather than assumed: the audit is satisfied by a comment *trailing*
-# the permission and not by one on the line above it. All three of those lines
-# already carry an explanation — on the line above. Clearing them means either
-# repeating each one as a trailing comment or flattening it into one, in the
-# three places where the rationale is longest, and this repository trades the
-# other way. A gate whose green depends on a list of suppressions is a gate
-# nobody reads, and one bought by shortening the reasoning is worse than that.
+#   1  concurrency-limits         validate.yml, which needs no concurrency
+#                                 group because no job in it takes a lock.
+#   5  undocumented-permissions   the `id-token: write` lines in plan.yml (one),
+#                                 apply.yml (two) and e2e.yml (two).
+#   2  secrets-outside-env        the two `secrets.PROVIDER_LOCK_TOKEN`
+#                                 references in provider-lock-refresh.yml.
+#   1  superfluous-actions        peter-evans/create-pull-request in the same
+#                                 file, which zizmor reads as functionality the
+#                                 runner already provides. Here it is not:
+#                                 opening this pull request with the runner's
+#                                 own token is exactly what docs/BOOTSTRAP.md
+#                                 section 8 rules out, and why.
+#
+# The list is what is load-bearing, not the number. This paragraph said "(4
+# suppressed)" and "three `undocumented-permissions` ... in plan.yml and
+# apply.yml" until e2e.yml added two more and nothing here noticed — a bare
+# count goes stale silently, an enumeration goes stale visibly.
+#
+# `undocumented-permissions` is not fixable in the direction it looks, which is
+# measured at v1.29.0 rather than assumed: the audit is satisfied by a comment
+# *trailing* the permission and not by one on the line above it. All five of
+# those lines already carry an explanation — on the line above. Clearing them
+# means either repeating each one as a trailing comment or flattening it into
+# one, in the five places where the rationale is longest, and this repository
+# trades the other way.
+#
+# `secrets-outside-env` is the one item here worth revisiting on its own
+# merits, and it is not only an audit. It asks for the token to live on a
+# GitHub Environment rather than on the repository, and an Environment with a
+# deployment branch policy of `main` would make that token unreadable from a
+# topic branch — structurally stronger than the ref check
+# provider-lock-refresh.yml performs in a `run:` block, which a modified copy
+# of that workflow on a branch could simply delete. It is not taken here
+# because it changes how the platform is bootstrapped rather than how it is
+# audited, and docs/BOOTSTRAP.md section 8 specifies a repository secret.
+#
+# A gate whose green depends on a list of suppressions is a gate nobody reads,
+# and one bought by shortening the reasoning is worse than that.
+#
+# `--strict-collection` is the one flag here that changes this target's
+# contract rather than its findings, so it is argued rather than added.
+#
+# Without it, an input zizmor cannot validate against its schema is dropped
+# with a WARN line and the run carries on — which is exit 0 on a file nobody
+# read. Measured at v1.29.0 against a deliberately broken Dependabot config: a
+# mistyped top-level key (`updaets:`) and a mistyped `package-ecosystem` value
+# (`gihub-actions`) each print `failed to validate ... as dependabot config` at
+# WARN and exit 0, and the flag turns both into exit 1. The second is the one
+# that matters. A typo in that value is a Dependabot configuration that does
+# nothing at all, and without the flag this target reports green having read it
+# and green having *not* read it, identically — including the
+# `dependabot-cooldown` finding, which stops firing along with everything else.
+#
+# It is not complete coverage, and the gap is measured the same way: a mistyped
+# key *inside* an update entry passes the schema and is caught in neither mode
+# (`includ:` under `commit-message`, and `scheduel:` for `schedule:`, both
+# measured clean). So the flag closes the case where the file is silently not
+# read. The case where it is read and means something other than intended is
+# still held by nothing here, and shows up as a Dependabot pull request that
+# never arrives — which is a slow signal, and is named as one rather than
+# covered.
 audit: check-zizmor audit-policy ## Audit the GitHub Actions workflows: zizmor, and the rules zizmor has no rule for.
-	zizmor --offline .
+	zizmor --offline --strict-collection .
 
 # Rules 4 and 5 of the policy at the top of validate.yml, which nothing else in
 # this repository has a rule for.
@@ -770,10 +834,33 @@ audit-policy: ## Check the two hardening rules no linter here covers.
 # `known-vulnerable-actions` reports on a database rather than on this tree.
 # Neither belongs in a gate. Both are fine in a command somebody types.
 #
-# When to type it: whenever a `uses:` pin moves. That is the moment
-# `ref-version-mismatch` exists for, and from commit 25 it is Dependabot and the
-# lock-refresh workflow doing the moving rather than a person — at which point
-# this target belongs in that workflow and this comment should say so instead.
+# One half of that has since been measured and is weaker than it was written,
+# and it is left standing rather than quietly edited because the paragraph is
+# what the `audit-online` job in validate.yml points readers at. The
+# credential half does not hold: zizmor's online audits are public reads — ref
+# listings on github.com, `api.github.com/advisories` — so the token lifts a
+# rate limit and selects zizmor's mode rather than authorising anything, and a
+# Dependabot pull request's read-only token is enough. The second half is
+# untouched and decides it alone: `known-vulnerable-actions` reports on a
+# database that moves without a commit, so a required check running it could
+# take `main` red on a Tuesday with nothing here having changed.
+#
+# When it runs, which is no longer only when somebody types it. The
+# `audit-online` job in validate.yml runs this target on every pull request,
+# which covers the moment `ref-version-mismatch` exists for — a `uses:` pin
+# moving — without depending on anyone remembering. .github/dependabot.yml is
+# what moves most of them now; a pin moved by hand is covered by the same job
+# for the same reason.
+#
+# Not the lock-refresh workflow, and that is easy to get backwards.
+# .github/workflows/provider-lock-refresh.yml rewrites `.terraform.lock.hcl`
+# and never touches a `uses:` line, so this target's most useful audit would
+# have nothing to read in its diff. Dependabot moves action pins; the lock
+# refresh moves provider versions.
+#
+# Typing it by hand is still worth it in one place: on a branch, before the
+# pull request exists, right after the pin was written. The job is the net
+# under that rather than a replacement for it.
 #
 # Two things stand between this target and a pass it has not earned, and they
 # are handled differently on purpose.
