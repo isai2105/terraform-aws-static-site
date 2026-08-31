@@ -640,10 +640,10 @@ Create a fine-grained PAT or a GitHub App installation token scoped to this repo
 gh secret set PROVIDER_LOCK_TOKEN
 ```
 
-**Until it is set, that workflow fails on its first step**, deliberately and before it spends
-ten minutes downloading providers: the run would otherwise compute five correct lock files and
-then fail to do the one thing it exists to do, on an authentication error naming nothing. A
-Tuesday-morning red check pointing at this section is the better half of that trade.
+**Until it is set, that workflow fails on its first step**, deliberately and before it spends the
+run downloading providers: it would otherwise compute five correct lock files and then fail to do
+the one thing it exists to do, on an authentication error naming nothing. A Tuesday-morning red
+check pointing at this section is the better half of that trade.
 
 Dependabot's own pull requests do not have this problem — they do trigger workflows — but they
 carry a read-only token with no access to repository secrets, which is the constraint that

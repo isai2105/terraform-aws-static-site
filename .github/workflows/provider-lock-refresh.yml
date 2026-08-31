@@ -76,6 +76,34 @@
 # the last change that should land without a plan." A pull request that can
 # never run that plan is the one shape this change must not take.
 #
+# What that plan proves is narrower than "a real plan against real state"
+# sounds, and the first live run measured the gap. On the pull request run
+# 33442161505 opened — #40, aws 6.61.0 to 6.62.0 — both `plan (stage)` and
+# `plan (prod)` reported `Plan: 18 to add, 0 to change, 0 to destroy`, and so
+# did the two most recent plan runs on 6.61.0 before it, 33437232203 and
+# 33423124730. An identical plan across the bump is real evidence and it is
+# the best available here: it says the new provider builds the same eighteen
+# resources from the same configuration, with nothing the upgrade renamed,
+# defaulted differently, or would have forced a replacement over.
+#
+# It does not say the bump is inert against running infrastructure, and it
+# cannot. Nothing in this repository stays deployed — e2e.yml's header makes
+# that the premise the whole check set is arranged around — so both
+# environments plan from empty state, and `18 to add, 0 to change` is what a
+# clean plan looks like here whatever the provider version is. A plan that
+# creates from nothing exercises none of the provider's diff logic against a
+# resource that already exists, which is where a bump usually goes wrong.
+#
+# e2e.yml is the check that does exercise it. It applies `stage` for real,
+# smoke-tests it and destroys it, weekly, "against whatever AWS and the pinned
+# provider have become since the last run" — its words, and the provider is
+# pinned by the files this workflow rewrites. So the division to keep straight
+# is that plan.yml gates a bump on the configuration, the Tuesday slot below
+# puts the proposal a day after the run that last exercised the version being
+# moved away from, and the first time a new provider touches live resources is
+# in e2e.yml rather than in the pull request this file opens. Reading the plan
+# on #40 is worth doing and is not the same as having applied it.
+#
 # Hence `PROVIDER_LOCK_TOKEN`, a fine-grained token with `contents: write` and
 # `pull-requests: write` scoped to this repository. docs/BOOTSTRAP.md section 8
 # creates it. The preflight step below refuses the run when it is absent
@@ -142,7 +170,7 @@ permissions: {}
 #
 # `cancel-in-progress: false` all the same. A dispatch arriving mid-run would
 # otherwise cancel it somewhere inside the push, and a half-updated branch is
-# worse than a run that waits ten minutes for the one ahead of it.
+# worse than a run that waits for the one ahead of it.
 concurrency:
   group: provider-lock-refresh
   cancel-in-progress: false
@@ -155,12 +183,25 @@ jobs:
     # timeout in this repository does. The work is dominated by downloads —
     # the AWS provider fetched for two platforms in each of five directories,
     # ten uncached fetches — so the runtime is a property of the link rather
-    # than of this repository. One observation, offered as an order of
-    # magnitude and not as a number to hold this timeout against: a little
-    # under ten minutes on a residential connection, and a runner on a
-    # different link is a different figure. Thirty is picked to leave room for
-    # a slow registry rather than to sit just above a measurement, and what it
-    # exists to stop is a hung job reaching GitHub's six-hour default.
+    # than of this repository — and the two measurements there are for it
+    # differ by most of an order of magnitude, which is the point rather than
+    # a caveat. A little under ten minutes on a residential connection, which
+    # is all this comment had before the workflow had ever run. 1m24s for the
+    # whole job on run 33442161505, the first dispatch, on a GitHub-hosted
+    # runner sitting far nearer the registry than a laptop is. The runner
+    # figure is the one that governs, because the runner is where this
+    # workflow runs; the laptop figure is kept because it is what somebody
+    # reproducing the loop by hand will see.
+    #
+    # Thirty stays, and the runner measurement argues for leaving it rather
+    # than for tightening it. It makes this bound roughly twenty times the
+    # observed runtime instead of the three the older figure implied, and a
+    # headroom multiple is not the property being bought. A timeout that fires
+    # on a slow success is strictly worse than no timeout — it turns a
+    # degraded registry into a red check on a proposal that was correct — and
+    # a bound set just above a number measured once is how that happens. What
+    # this one exists to stop is a hung job reaching GitHub's six-hour
+    # default, and 1m24s says nothing about where a hang would sit.
     timeout-minutes: 30
     permissions:
       # Only what the checkout needs. The push and the pull request are made
@@ -168,7 +209,7 @@ jobs:
       # by anything written here.
       contents: read
     steps:
-      # First, before ten minutes of downloads, because both of these make the
+      # First, before the provider downloads, because both of these make the
       # run incapable of producing a pull request and neither gets better
       # later.
       - name: Check that this run can open a pull request
@@ -243,12 +284,12 @@ jobs:
         #
         # The predicate is the lock file itself, not `*.tf`. That makes the
         # set exactly "the lock files this repository commits", which is
-        # tautologically the set this workflow maintains — there is no
-        # committed lock file it can miss. The two predicates select the same
-        # five directories today, measured; what separates them is the sixth
-        # root somebody adds later. On `*.tf` this workflow would *create* a
-        # lock file for it, inside a pull request titled "refresh", for a
-        # directory nobody had decided should have one.
+        # tautologically the set this *discovery* covers — there is no
+        # committed lock file `find` can miss. The two predicates select the
+        # same five directories today, measured; what separates them is the
+        # sixth root somebody adds later. On `*.tf` this workflow would
+        # *create* a lock file for it, inside a pull request titled "refresh",
+        # for a directory nobody had decided should have one.
         #
         # The gap that leaves, stated rather than discovered: a new root whose
         # author never committed its `.terraform.lock.hcl` is invisible here,
@@ -259,6 +300,37 @@ jobs:
         # on every commit touching Terraform, and the file is not gitignored —
         # so it exists and is untracked in the working tree before the root's
         # first commit, where `git status` shows it.
+        #
+        # Discovery is only half of it, and it is the half that is easy to
+        # argue. What this loop refreshes and what the run actually proposes
+        # are two separate mechanisms — `find` here, a git pathspec in the two
+        # steps below — and the guarantee above is worth exactly as much as
+        # their agreement. It was worth less than that until they were made to
+        # agree. Both steps matched `'**/.terraform.lock.hcl'` alone, and a
+        # `**/`-prefixed pathspec requires at least one directory component.
+        # Verified in a throwaway repository holding lock files at the root,
+        # at `sub/` and at `deep/deeper/`: this `find | sed` yields `.`,
+        # `./sub` and `./deep/deeper`, while
+        # `git diff --name-only -- '**/.terraform.lock.hcl'` and
+        # `git add -- '**/.terraform.lock.hcl'` yield the latter two and never
+        # the root. With only the root file modified, `git diff --quiet`
+        # against that pathspec exits 0.
+        #
+        # So a repository-root lock file would have been refreshed by this
+        # loop, reported as "no change" by the summary step, and dropped from
+        # the pull request — the run green, the file gone, nothing anywhere
+        # saying so. That is the silent-narrowing failure this whole file is
+        # arranged against, relocated from platforms to paths: a lock this
+        # workflow rewrote and then declined to propose is no better than a
+        # lock narrowed to one platform. Both steps now name the root form
+        # alongside the nested one, re-verified in the same repository.
+        #
+        # This repository commits no root lock file, which is why the gap cost
+        # nothing and why review passed it: the pathspec was checked against
+        # files one level deep, where it is correct, and it is correct there
+        # for every case anybody thought to try. A predicate exercised only
+        # where it holds has not been tested, and the rule this comment
+        # already applies to discovery applies to staging too.
         #
         # A `while read` loop over a here-string rather than `mapfile`, unlike
         # plan.yml's `detect`. The difference is who is expected to run it:
@@ -307,7 +379,15 @@ jobs:
         id: changes
         shell: bash
         run: |
-          if git diff --quiet -- '**/.terraform.lock.hcl'; then
+          # Two pathspecs and not one, held in a variable so the three uses
+          # below cannot drift apart. `**/` requires at least one directory
+          # component, so the nested form alone does not match a lock file at
+          # the repository root; the pair does. The same pair is repeated in
+          # `add-paths` on the step after this one, which is the copy that
+          # decides what the pull request contains.
+          locks=(".terraform.lock.hcl" "**/.terraform.lock.hcl")
+
+          if git diff --quiet -- "${locks[@]}"; then
             echo "no change: every committed lock file is already current"
             {
               echo "### Provider lock refresh"
@@ -316,12 +396,12 @@ jobs:
               echo "records the newest release each constraint admits."
             } >> "$GITHUB_STEP_SUMMARY"
           else
-            git --no-pager diff --stat -- '**/.terraform.lock.hcl'
+            git --no-pager diff --stat -- "${locks[@]}"
             {
               echo "### Provider lock refresh"
               echo
               echo '```'
-              git --no-pager diff --stat -- '**/.terraform.lock.hcl'
+              git --no-pager diff --stat -- "${locks[@]}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -340,7 +420,14 @@ jobs:
           # the paths makes the pull request's file set an assertion rather
           # than a consequence, which matters because plan.yml's `detect` job
           # decides what to plan by reading exactly that set.
-          add-paths: "**/.terraform.lock.hcl"
+          #
+          # Two entries, for the reason argued at the discovery step above:
+          # `**/.terraform.lock.hcl` matches nothing at the repository root,
+          # so the root form is named alongside it. `add-paths` takes a
+          # newline-separated list.
+          add-paths: |
+            .terraform.lock.hcl
+            **/.terraform.lock.hcl
           branch: ci/provider-lock-refresh
           # Nothing here reopens a closed refresh, so a branch left behind
           # after one is closed unreviewed would sit there being stale.
@@ -360,6 +447,30 @@ jobs:
           # account GitHub reports would be attribution nobody chose. Both
           # halves are pinned to the same bot instead, so the commit says what
           # made it.
+          #
+          # That works for the commit and not for the pull request, which is
+          # measured rather than assumed. On run 33442161505 the commit pushed
+          # to `ci/provider-lock-refresh` carries `github-actions[bot]
+          # <41898282+github-actions[bot]@users.noreply.github.com>` as both
+          # author and committer, which is exactly what these two inputs ask
+          # for. Pull request #40 itself is authored by `isai2105`. These
+          # inputs reach `git commit` and nothing else; the pull request is
+          # opened through the REST API with the token below, and a
+          # fine-grained PAT has no identity apart from the person who owns
+          # it. So on a Tuesday 04:23 run the Actions list shows the
+          # maintainer opening a pull request they were asleep for.
+          #
+          # Nothing written here can close that. Only a GitHub App
+          # installation token gives the pull request a non-human author,
+          # because only an App is a non-human account, and that is the
+          # standing reason to move to one. It is a different reason from the
+          # one recorded against `secrets-outside-env` beside the `audit`
+          # target in the Makefile, and the two should not be collapsed: that
+          # one is about authority — an Environment with a `main` deployment
+          # branch policy makes the token unreadable from a topic branch —
+          # and this one is about attribution. An Environment would not change
+          # who the pull request is from, and an App would not by itself stop
+          # a topic branch from reading the secret.
           author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           body: |
@@ -378,7 +489,12 @@ jobs:
               is a lock narrowed to whatever resolved first.
             - `plan-gate` is not enough on its own here. This diff touches
               `modules/`, so plan.yml selects every environment and there is a
-              real plan to read.
+              real plan to read. Read it for what it can show: neither
+              environment is applied, so both plan from empty state and a
+              clean plan says the new provider builds the same resources from
+              the same configuration. Whether the bump is inert against
+              resources that already exist is e2e.yml's weekly answer, not
+              this pull request's.
 
             Opened by `.github/workflows/provider-lock-refresh.yml`.
 
