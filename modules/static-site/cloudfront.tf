@@ -173,7 +173,9 @@ resource "aws_cloudfront_function" "spa_routing" {
   # form of that choice is that nothing in this repository checks JavaScript
   # either way. No pre-commit hook here would check a .js file: the Terraform
   # hooks match `.tf`, `.tfvars` and `.tftest.hcl` (plus the Makefile and a few
-  # pinned config files), the workflow hooks match `.github/**`, gitleaks reads
+  # pinned config files), the workflow hooks match YAML under `.github/` and an
+  # `action.yml` at any depth rather than everything in `.github/` — as
+  # `.github/CODEOWNERS`, which they skip, now shows — gitleaks reads
   # every file but looks only for secrets, and there is no generic formatter,
   # whitespace or end-of-file hook at all. Only `.editorconfig` would reach it,
   # and that is not a check. Nor are these lines checked where they are: to
