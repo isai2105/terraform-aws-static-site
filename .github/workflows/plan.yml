@@ -162,6 +162,18 @@ jobs:
           # in this repository is the move, as it is for a fork below. A
           # provider bump is the last change that should land without a plan.
           #
+          # What that plan can show depends on what is deployed, and today
+          # nothing is: both environments plan from empty state, so a bump's
+          # plan says the configuration still builds the same resources under
+          # the new provider, not that the bump is inert against resources
+          # that already exist. e2e.yml is what exercises the second, weekly,
+          # by applying `stage` for real. Measured on #40, aws 6.61.0 to
+          # 6.62.0: `plan (stage)` and `plan (prod)` both reported
+          # `Plan: 18 to add, 0 to change, 0 to destroy`, matching the two
+          # most recent 6.61.0 runs exactly. That is the evidence this job can
+          # produce for a bump, and it is worth having — it is just not the
+          # same evidence as an apply.
+          #
           # That last sentence is why .github/workflows/provider-lock-refresh.yml
           # opens its pull request with PROVIDER_LOCK_TOKEN rather than with the
           # default one: its diff touches modules/static-site/.terraform.lock.hcl,
