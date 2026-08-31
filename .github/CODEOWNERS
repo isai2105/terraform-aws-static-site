@@ -22,10 +22,16 @@
 # ---------------------------------------------------------------------------
 #
 # **GitHub does not request a review from the author of a pull request, even
-# when that author is the code owner.** On a repository where every pull
-# request opened to date — 41 of them, as of 2026-08-31 — was opened by the
-# single account named below, that is most of what there is to say about this
+# when that author is the code owner.** Every pull request this repository has
+# received was opened by the single account named below — measured 2026-08-31
+# — and on such a repository that is most of what there is to say about this
 # file's day-to-day effect.
+#
+# There is deliberately no count in that sentence. An earlier version gave
+# one, and it was already wrong when it was committed: the pull request that
+# added this file was the next one after the number it quoted. A count that
+# every pull request invalidates, starting with the pull request carrying it,
+# is not a measurement worth keeping.
 #
 # GitHub's documentation does not say it, which is why what follows is
 # measurement and not a citation: as of 2026-08-31 the 178 lines of
@@ -140,6 +146,14 @@
 # pattern on line 8" and the API does not mention. With one pattern, and that
 # pattern `*`, there is nothing here for it to miss today. The commit that
 # adds a second pattern is the commit that makes the gap real.
+#
+# The check can also decline to answer. That endpoint caches per exact ref
+# string and serves a sticky 404 for a string first queried before its index
+# was built — measured here on 2026-08-31, on this file's own commit, which
+# answered 200 under every other spelling of the same tree that was tried. A run that hits
+# one of those warns instead of checking, and .github/workflows/validate.yml
+# holds the measurement and the three-way test that tells it apart from a
+# CODEOWNERS that really is gone.
 * @isai2105
 
 # ---------------------------------------------------------------------------
