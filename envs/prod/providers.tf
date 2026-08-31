@@ -24,9 +24,9 @@ locals {
   # workflow proves a teardown left nothing behind by asking the resource groups
   # tagging API for everything carrying Project and Env. An untagged orphan is
   # invisible to that query, so the assertion cannot tell "nothing survived"
-  # from "something survived without tags", and a stranded log group is the
-  # first item on the post-destroy checklist. The module checks for this at plan
-  # time rather than trusting it; this is the shape that passes.
+  # from "something survived without tags", and a stranded log group is on the
+  # post-destroy checklist. The module checks for this at plan time rather than
+  # trusting it; this is the shape that passes.
   tags = {
     Project = var.project
 

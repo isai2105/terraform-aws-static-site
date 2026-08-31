@@ -49,11 +49,11 @@ output "access_log_group_name" {
   description = "Name of the CloudWatch Logs group receiving CloudFront access logs, in us-east-1 regardless of this environment's own region."
 
   # Published for the teardown check rather than for day-to-day use. A stranded
-  # log group is the first item on the post-destroy checklist, and it is in
-  # us-east-1 while the tagging-API assertion runs against this environment's
-  # region — so the check that would otherwise find it is looking in the wrong
-  # place. Naming the group here is what lets a teardown step assert against it
-  # directly instead of inferring it.
+  # log group is on the post-destroy checklist, and it is in us-east-1 while the
+  # tagging-API assertion runs against this environment's region — so the check
+  # that would otherwise find it is looking in the wrong place. Naming the group
+  # here is what lets a teardown step assert against it directly instead of
+  # inferring it.
   value = module.site.access_log_group_name
 }
 

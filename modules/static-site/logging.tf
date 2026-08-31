@@ -95,9 +95,9 @@ resource "aws_cloudwatch_log_group" "access_logs" {
   retention_in_days = var.log_retention_days
 
   # The module's tagging contract, checked here because this resource is where
-  # breaking it costs the most: a stranded log group is the first item on the
-  # post-destroy checklist, and an untagged one is invisible to the teardown
-  # assertion that exists to find it. tags.tf carries the full reasoning.
+  # breaking it costs the most: a stranded log group is on the post-destroy
+  # checklist, and an untagged one is invisible to the teardown assertion that
+  # exists to find it. tags.tf carries the full reasoning.
   #
   # The check covers both provider configurations rather than only the aliased
   # one, so it is stated once, on the resource most exposed to it, instead of

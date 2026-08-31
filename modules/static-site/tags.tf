@@ -37,8 +37,8 @@
 # tagging API for everything carrying this repository's Project and Env tags and
 # asserting the answer is empty. An untagged orphan is invisible to that query,
 # so the assertion cannot tell "nothing survived" from "something survived
-# without tags" — and a stranded log group is the first item on the post-destroy
-# checklist. The check would go green on exactly the leak it exists to catch.
+# without tags" — and a stranded log group is on the post-destroy checklist. The
+# check would go green on exactly the leak it exists to catch.
 #
 # So the contract is checked at plan time instead of trusted. The cost is two
 # local data reads and a precondition; the alternative is an assertion that
