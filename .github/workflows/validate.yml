@@ -607,11 +607,49 @@ jobs:
       # the file as it will be after the merge rather than the file on `main`.
       # On a push it validates `refs/heads/main`.
       #
-      # **A 404 is a failure here, and treating it as a clean result is the
-      # trap.** The endpoint does not answer `{"errors":[]}` for a repository
-      # with no CODEOWNERS; it answers 404, the same answer a ref that does
-      # not resolve gets. Deleting the file would otherwise silence the check
-      # that exists to notice the file.
+      # **A 404 does not mean one thing here, and an earlier version of this
+      # step assumed it meant two.** It said a 404 was a missing
+      # `.github/CODEOWNERS` or a ref that does not resolve. Both of those do
+      # 404 — a repository with no CODEOWNERS answers 404 rather than
+      # `{"errors":[]}`, which is why deleting the file must not silence the
+      # check that exists to notice the file. But they are not the whole list,
+      # and the third cause was measured on this repository on 2026-08-31,
+      # minutes after `.github/CODEOWNERS` first landed on `main`:
+      #
+      #   ?ref=41696d993ba4dae051c7bea560b94881f5cd33e5   404
+      #   ?ref=41696d993ba4dae051c7bea560b94881f5cd33e    200 {"errors":[]}
+      #   ?ref=41696d9                                    200 {"errors":[]}
+      #   ?ref=refs/heads/main                            200 {"errors":[]}
+      #   ?ref=main                                       404
+      #
+      # Every one of those five names the same commit — the tip of `main`,
+      # with the file present at it. The endpoint caches per exact ref string,
+      # and a query that arrives before the index for that string is built
+      # caches the 404: the two that failed were the two queried in the first
+      # minutes after the merge, and they were still failing eighteen minutes
+      # later under a once-a-minute poll, while spellings nobody had tried
+      # answered 200 on first ask. A branch pushed during that same window
+      # answered 200 under all three of its spellings eight seconds after the
+      # push, so the index is not generally slow — what is sticky is the
+      # negative entry. Eight other public repositories answered all four
+      # forms 200, which rules out the ref form itself being rejected.
+      #
+      # So a 404 is ambiguous in a way that decides what this step should do,
+      # and the step asks rather than guesses. It tries a second spelling of
+      # the same tree — `github.sha`, a different cache key — and only if that
+      # also 404s does it work out which cause it is looking at, using two
+      # endpoints that have no CODEOWNERS index behind them and so cannot be
+      # poisoned the same way. The file being genuinely absent is the only one
+      # of the three that fails the job. The other two warn: a check that goes
+      # red for a reason that is not about CODEOWNERS teaches a maintainer to
+      # ignore it, and this job is not required precisely so that its red
+      # means something when it appears.
+      #
+      # The re-run case is the one that made this concrete rather than
+      # theoretical. `refs/pull/N/merge` stops existing once the pull request
+      # merges — measured: `git/ref` 404s for `pull/42/merge` — so re-running
+      # this job on a merged pull request asks about a ref that is gone. That
+      # is not a CODEOWNERS failure and no longer reports as one.
       #
       # What it does not cover, measured rather than assumed: the endpoint
       # reports unknown owners and misses invalid *patterns* entirely, and it
@@ -622,13 +660,46 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
         run: |
-          if ! response="$(gh api "/repos/${GITHUB_REPOSITORY}/codeowners/errors?ref=${REF}")"; then
-            echo "::error::codeowners/errors did not answer 200 for ${REF}." \
-                 "That is a missing .github/CODEOWNERS or a ref that does not" \
-                 "resolve — the endpoint 404s in both cases and never reports" \
-                 "an empty error list for an absent file."
-            exit 1
+          # Two spellings of one tree, because the endpoint caches per exact
+          # ref string and a poisoned entry under one is not poisoned under
+          # the other. A 200 under either is the same answer about the same
+          # file.
+          response=""
+          for ref in "${REF}" "${SHA}"; do
+            if response="$(gh api \
+              "/repos/${GITHUB_REPOSITORY}/codeowners/errors?ref=${ref}")"; then
+              break
+            fi
+            response=""
+          done
+
+          if [ -z "$response" ]; then
+            # Neither answered. `contents` and `commits` are ordinary git
+            # reads with no CODEOWNERS index behind them, so between them they
+            # say which of the three causes this is.
+            if gh api "/repos/${GITHUB_REPOSITORY}/contents/.github/CODEOWNERS?ref=${SHA}" \
+              >/dev/null 2>&1; then
+              echo "::warning::codeowners/errors answered 404 at both ${REF}" \
+                   "and ${SHA}, but .github/CODEOWNERS is present at that" \
+                   "commit. That is the endpoint's per-ref cache, not this" \
+                   "repository — the owner named in the file was not checked" \
+                   "on this run."
+            elif ! gh api "/repos/${GITHUB_REPOSITORY}/commits/${SHA}" \
+              >/dev/null 2>&1; then
+              echo "::warning::${SHA} no longer resolves, so there is nothing" \
+                   "to read a CODEOWNERS from. This is what a re-run of this" \
+                   "job on an already-merged pull request looks like:" \
+                   "refs/pull/N/merge stops existing once it merges."
+            else
+              echo "::error::.github/CODEOWNERS is absent at ${SHA} and" \
+                   "codeowners/errors 404s for it. A repository with no" \
+                   "CODEOWNERS 404s here rather than reporting an empty error" \
+                   "list, so this fails rather than passing quietly."
+              exit 1
+            fi
+            exit 0
           fi
 
           count="$(jq '.errors | length' <<< "$response")"
@@ -643,7 +714,10 @@ jobs:
             exit 1
           fi
 
-          echo "CODEOWNERS at ${REF}: no errors"
+          # `${ref}` rather than `${REF}`: the loop above leaves it holding
+          # the spelling that answered, which is the one worth reporting when
+          # the first was the one that 404d.
+          echo "CODEOWNERS at ${ref}: no errors"
 
   # The pull request title becomes the subject of the squashed commit, so it is
   # checked with the same rigour as the code. Skipped on push, where there is
