@@ -14,13 +14,25 @@
 # binary too old for the roots it exists to enable.
 #
 # Provider constraints are pinned at the minor rather than the major, and the
-# reason is the floor, not the ceiling — `~> 6.0` and `~> 6.61` share an upper
-# bound of `< 7.0.0`. The difference is that under `~> 6.0` every later 6.x
-# release already satisfies the constraint, so nothing automated ever proposes
-# a change to this file and the declared floor silently ages out of relevance.
-# Under `~> 6.61` the constraint itself goes stale the day 6.62 ships, which is
-# what turns a provider bump into a reviewed commit instead of a lock-file diff
-# nobody reads.
+# reason is the floor, not the ceiling. `~> 6.0` and `~> 6.61` share an upper
+# bound of `< 7.0.0`: `~>` allows the rightmost component of the version it is
+# given to increment, so a two-part `~> 6.61` means `>= 6.61.0, < 7.0.0`.
+#
+# What separates them is the floor alone, and a floor is a claim about what has
+# been tested. `~> 6.0` says any 6.x will do, which nothing in this repository
+# has established. `~> 6.61` says at least the release this was written and
+# locked against, which is a claim the lock file beside it can be checked
+# against.
+#
+# It does not make a provider bump a reviewed commit, and an earlier version of
+# this comment claimed it did. 6.62.0 satisfies `~> 6.61` already, so
+# `terraform init -upgrade` moves the lock file with this file untouched —
+# measured, against 6.62.0, on the tree that carries this comment. What makes
+# the bump a reviewed change of its own is
+# .github/workflows/provider-lock-refresh.yml, which re-resolves every
+# committed lock file weekly and opens the result as a pull request. This
+# constraint sets the range that refresh may move inside; it does not trigger
+# it and does not gate it.
 terraform {
   required_version = ">= 1.11"
 

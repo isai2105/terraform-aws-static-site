@@ -22,9 +22,16 @@ terraform {
 
       # Pinned at the minor rather than the major, matching the bootstrap, the
       # module and `envs/stage`. `~> 6.0` and `~> 6.61` share an upper bound of
-      # `< 7.0.0`; the difference is that under `~> 6.0` every later 6.x release
-      # already satisfies the constraint, so nothing automated ever proposes a
-      # change here and the declared floor silently ages out of relevance.
+      # `< 7.0.0` — `~>` lets the rightmost component increment, so `~> 6.61` is
+      # `>= 6.61.0, < 7.0.0` — and what separates them is the floor alone.
+      # `~> 6.0` claims any 6.x will do, which nothing here has tested; this
+      # claims at least the release the lock file beside it records.
+      #
+      # Neither constraint is what gets a bump reviewed, because 6.62.0
+      # satisfies this one already.
+      # .github/workflows/provider-lock-refresh.yml is what proposes the move,
+      # and this is the range it may move inside — in one change across every
+      # root, which is what the paragraph below depends on.
       #
       # The constraint being identical to stage's is what makes the promotion
       # path mean anything: an environment that could resolve a different
