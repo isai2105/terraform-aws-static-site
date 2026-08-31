@@ -522,8 +522,27 @@ jobs:
   # to disarm: a pull request that changes no environment expands it to zero
   # entries, no check run is ever created under `plan (stage)` or any other
   # name, and the pull request sits on "Expected — Waiting for status to be
-  # reported" until somebody bypasses the ruleset. Every documentation,
-  # CODEOWNERS and workflow change is that pull request.
+  # reported" until somebody bypasses the ruleset. A pull request confined to
+  # `.github/` is that pull request — this workflow, a Dependabot bump, a
+  # CODEOWNERS edit — and so is one confined to `docs/`.
+  #
+  # The unit is the pull request and not the commit, which is easy to write
+  # the wrong way round: `detect` diffs the whole branch against its base, so
+  # one file under `modules/` anywhere in a branch selects every environment
+  # for the branch. The commit that added `.github/CODEOWNERS` shared a branch
+  # with a comment fix in `modules/static-site/cloudfront.tf` and both
+  # environments were planned, correctly.
+  #
+  # "Documentation" is not the category either, which is worth stating because
+  # it is the obvious way to describe the same set and it is wrong. The
+  # `detect` job reads paths, not kinds, and `modules/static-site/README.md` —
+  # a file the `docs` target generates half of and .pre-commit-config.yaml
+  # calls "mostly prose" — matches the shared `modules/*` glob: a prose-only
+  # edit to it selects every environment, takes the state lock and runs two
+  # real plans. Measured against the selection logic above —
+  # `docs/BOOTSTRAP.md`, `docs/TEARDOWN.md`, `Makefile` and
+  # `.github/CODEOWNERS` each select nothing; `modules/static-site/README.md`
+  # and `.terraform-version` each select both environments.
   #
   # It also keeps the required set credential-free. It touches no AWS and needs
   # no token, so it reports on pull requests that cannot assume a role at all —

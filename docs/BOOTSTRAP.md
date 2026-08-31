@@ -305,8 +305,14 @@ regular contributor arrives, or when a merge queue does.
 
 A single maintainer cannot approve their own pull request, so a required approval would mean
 bypassing the ruleset on every commit — and a rule bypassed on every use is an off switch with
-extra steps. The same argument keeps "require review from Code Owners" off once `CODEOWNERS`
-lands: it drives review *requests*, which is what it is good for.
+extra steps. The same argument keeps "require review from Code Owners" off now that
+`.github/CODEOWNERS` exists, and the file is worth having anyway — but not for the reason an
+earlier version of this paragraph gave. It does not drive a review *request* on the
+maintainer's own pull requests: GitHub never requests a review from the author of a pull
+request, even when the author is the code owner. What it requests on is a pull request opened
+by somebody else, which here means Dependabot's weekly action bumps and any outside
+contributor's. That measurement, and the passive effects the file has on every other pull
+request, are argued in `.github/CODEOWNERS` itself rather than restated here.
 
 **Enable when a second maintainer exists** by replacing the `pull_request` rule's parameters
 above with:
