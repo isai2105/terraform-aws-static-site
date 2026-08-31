@@ -18,9 +18,11 @@
 # this root was first initialised. A repository that pins the CLI to an exact
 # patch so that local and CI run the same binary has no business running two
 # provider versions in two roots, and a module commit is not where a provider
-# gets bumped — that is what the scheduled lock refresh exists for, so that the
-# bump is a reviewed change of its own rather than a side effect of unrelated
-# work.
+# gets bumped — that is what
+# .github/workflows/provider-lock-refresh.yml exists for, so that the bump is a
+# reviewed change of its own rather than a side effect of unrelated work. This
+# root is one of the five directories that workflow discovers, and it is
+# discovered by having the committed lock file rather than by being named.
 
 terraform {
   required_version = ">= 1.11"

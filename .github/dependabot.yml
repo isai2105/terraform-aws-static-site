@@ -1,0 +1,221 @@
+# Dependabot, for the GitHub Actions ecosystem and deliberately for nothing
+# else.
+#
+# What it covers is the `uses:` pins in .github/workflows/ — rule 1 at the top
+# of validate.yml, which says every one of them is a full commit SHA with the
+# version tag beside it as a comment. A SHA pin does not move, which is the
+# whole point of it; the price is that nothing moves it either, and an action
+# pinned when its workflow was written stays pinned there while the release it
+# names is superseded. This file is what proposes the move. Eight actions are
+# pinned across the five workflow files, and one of the six rules those files
+# follow has a deadline attached — rule 2's `using: node24`, against runners
+# that drop Node 20 on 23 September 2026.
+#
+# ---------------------------------------------------------------------------
+# Why the `terraform` ecosystem is deliberately absent
+# ---------------------------------------------------------------------------
+#
+# Not because Dependabot cannot read a `.terraform.lock.hcl`. It can, and it
+# updates one. The problem is which platforms the update leaves in it.
+#
+# Every lock file in this repository records `h1:` hashes for two platforms,
+# `linux_amd64` and `darwin_arm64` — the CI runner and the machine this is
+# developed on. That is not what `terraform init` produces on its own:
+# measured at Terraform 1.15.9 in modules/static-site/examples/default, a
+# fresh `init -backend=false -upgrade` writes one `h1:` per provider, for the
+# platform it happened to resolve on, and it takes a following
+# `terraform providers lock -platform=… -platform=…` to bring it back to two.
+# Dependabot's updater resolves on one platform, so a Dependabot-authored lock
+# update is the narrowed file rather than the two-platform one.
+#
+# **What that narrowing costs is not an `init` failure, and claiming otherwise
+# is the easy mistake here.** It was tested: with the `darwin_arm64` `h1:` for
+# aws deleted by hand, a plain `terraform init -backend=false` on darwin exits
+# 0, prints "Terraform has made some changes to the provider dependency
+# selections", and writes the missing hash straight back;
+# `init -lockfile=readonly` also exits 0, with a "Provider lock file not
+# updated" warning and nothing else. The textbook checksum error is real but
+# conditional — it needs the `zh:` hashes to be unusable too, which is a
+# filesystem mirror or an air-gapped install, and neither is how this
+# repository resolves providers.
+#
+# So the failure is quieter than that and worse. A narrowed lock does not stop
+# `init`; it stops being a lock. The committed file no longer describes what
+# the other platform actually runs, and it rewrites itself under whichever
+# contributor or runner reaches it first — surfacing later as an unexplained
+# `.terraform.lock.hcl` diff in a pull request about something else. A file
+# whose job is to be the record of what was resolved cannot be one that
+# quietly edits itself.
+#
+# .github/workflows/provider-lock-refresh.yml is the answer instead: the same
+# bump, proposed weekly, with the `providers lock` step that keeps both
+# platforms in the file. That workflow also gets the bump reviewed against a
+# real plan, which a Dependabot pull request could not — it carries a
+# read-only token and cannot assume an OIDC role, and plan.yml selects every
+# environment for any change under `modules/`.
+#
+# ---------------------------------------------------------------------------
+# The state of Dependabot's other two features on this repository
+# ---------------------------------------------------------------------------
+#
+# Version updates — this file — need nothing switched on anywhere; the config
+# is what enables them. Alerts and security updates are separate settings and
+# both are currently off (measured against the API: `vulnerability-alerts`
+# answers 404 "Vulnerability alerts are disabled", `automated-security-fixes`
+# answers `{"enabled": false}`). That is stated rather than left to be
+# discovered, because on a public repository it is a choice and not a default
+# anybody inherits.
+#
+# The overlap worth knowing before changing it: for the one ecosystem here,
+# alerts would report on the same GitHub Advisory data that zizmor's
+# `known-vulnerable-actions` audit reads in `make audit-online`. The
+# difference is when. `audit-online` runs on pull requests, so it answers when
+# somebody is already changing something; an alert arrives on the day the
+# advisory is published, against a repository nobody is touching. Those are
+# different guarantees, and this file does not pretend the first is the
+# second.
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    # `/` is the whole repository for this ecosystem; Dependabot reads
+    # .github/workflows/ from it. There are no composite actions here yet, and
+    # none of the five workflow files calls a local one.
+    directory: "/"
+
+    schedule:
+      interval: "weekly"
+      # Tuesday, and not the Monday e2e.yml already occupies. The ordering is
+      # the argument: e2e.yml applies and destroys `stage` on Monday at 04:17
+      # UTC against whatever `main` currently locks, and both bump proposals
+      # arrive the morning after — so what they propose moving away from was
+      # exercised end to end a day earlier rather than a week earlier. Early
+      # in the week for e2e.yml's stated reason: a failure gets the week to be
+      # dealt with rather than a weekend to sit through.
+      #
+      # This is the same minute provider-lock-refresh.yml is scheduled for,
+      # and that is deliberate rather than an oversight, because the two
+      # cannot contend. That workflow's pull request touches `modules/` and so
+      # starts a plan against every environment's real state; this one's
+      # touches only `.github/`, which plan.yml's `detect` job excludes from
+      # the shared set by name and says it excludes for exactly this case — so
+      # a Dependabot pull request takes no state lock and runs no plan at all.
+      # One maintenance slot, two proposals, one sitting.
+      day: "tuesday"
+      time: "04:23"
+      # Written down rather than inherited. Etc/UTC is Dependabot's default,
+      # and every other schedule in this repository is stated in UTC; a
+      # default that moves is one this file would not notice moving.
+      timezone: "Etc/UTC"
+
+    # Seven days of aging before a freshly published tag can be proposed.
+    #
+    # This is not a preference, it is a finding taken at face value. zizmor
+    # 1.29.0 has a `dependabot-cooldown` audit that runs offline, at the
+    # default persona, with no token — which is to say inside `make audit`,
+    # which is the required `zizmor` check. Measured: this file without these
+    # two lines produces `warning[dependabot-cooldown]: insufficient cooldown
+    # in Dependabot updates` at medium severity, annotating the
+    # `package-ecosystem` line above with `insufficient implicit default-days
+    # (less than 7)`; zizmor exits 13 and `make audit` exits 2. The commit that
+    # added Dependabot would have blocked itself.
+    #
+    # The other way to clear that finding is to lower zizmor's threshold in a
+    # configuration file, and it is the wrong way: a suppression bought
+    # against a gate is the shape the Makefile rejects at length. The finding
+    # is also defensible on its own terms here. A repository whose rule 1 is
+    # about not trusting a tag that can be moved has no business proposing a
+    # tag published this morning.
+    #
+    # The second-order effect, because it is not obvious: `cooldown` delays
+    # eligibility and `schedule: weekly` decides when eligibility is checked,
+    # so a release published the day after a Tuesday run waits seven days to
+    # become eligible and then to the following Tuesday to be seen — about
+    # fourteen days from publication to pull request, worst case. That is the
+    # cost of the posture and it is affordable for this ecosystem. It would
+    # not be for a security update, which is a different Dependabot feature
+    # and is off (see above).
+    cooldown:
+      default-days: 7
+
+    # `ci`, without a trailing colon, and the scope switched on.
+    #
+    # The pull request title becomes the squashed commit subject and is
+    # checked by the `pr-title` job in validate.yml against
+    # `^(feat|fix|docs|style|refactor|test|build|ci|chore|perf|revert)(\([^()]+\))?!?: .+$`
+    # — a required check, so a Dependabot pull request that fails it is a pull
+    # request nobody can merge.
+    #
+    # The colon is Dependabot's to add and not this file's, which is worth
+    # stating because writing `prefix: "ci:"` here is the obvious guess and it
+    # is wrong in a way that only shows up with `include: "scope"` set. Read
+    # from dependabot-core, `PrNamePrefixer#prefix_from_explicitly_provided_details`:
+    # the scope is appended first, then `":"` only if the result ends in a
+    # letter, digit or closing bracket, then a space. So `"ci"` becomes
+    # `ci(deps): ` and matches; `"ci:"` becomes `ci:(deps): `, which does not
+    # match, because the regex wants the scope between the type and the colon.
+    #
+    # The scope itself is `deps` or `deps-dev` depending on the dependency,
+    # and the regex admits either — it accepts any scope with no parentheses
+    # in it.
+    #
+    # `prefix-development` is not set, and that is not an omission. It is
+    # documented as applying to Bundler, Composer, Mix, Maven, NPM, Pip and
+    # UV, and never to `github-actions`; a line here would have no reader.
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+    # One pull request for every action, rather than one per action.
+    #
+    # The arithmetic is what decides it. Thirty-three `uses:` occurrences
+    # across five files resolve to eight distinct actions, and
+    # `actions/checkout` alone appears in all five — eight times in
+    # validate.yml. Ungrouped, a single checkout bump is one pull request
+    # rewriting eight lines in one file and seven more across the other four,
+    # and it arrives beside however many other actions moved that week.
+    #
+    # Grouped, it is one pull request, one run of the nine required checks,
+    # and — the part that actually costs a person time — one pass of the two
+    # obligations no tool holds: rule 2's `using: node24` at each new SHA, and
+    # a read of the new SHA against the tag comment beside it. `audit-online`
+    # in validate.yml now runs the second of those automatically on the pull
+    # request. The first is still a person, and grouping is what keeps it to
+    # one sitting a week.
+    #
+    # `open-pull-requests-limit` is deliberately not set. Under a single
+    # wildcard group there is at most one open pull request for this
+    # ecosystem, so the default of five is never approached, and a `1` written
+    # here would be a second bound that does nothing today and starves the
+    # next group somebody adds — silently, because a Dependabot pull request
+    # that is never opened produces no error anywhere. The group is the bound;
+    # a number repeating it would only be able to be wrong.
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+    # `labels:` is deliberately absent, and its absence is what gets the pull
+    # requests labelled at all.
+    #
+    # Read from dependabot-core's `PullRequestCreator::Labeler`:
+    # `create_default_dependencies_label_if_required` and
+    # `create_default_language_label_if_required` both open with
+    # `return if custom_labels`, and `labels_for_pr` then intersects the
+    # configured list with the labels the repository already has
+    # (`T.must(custom_labels) & labels`). So writing `labels: ["dependencies"]`
+    # on a repository that has no `dependencies` label suppresses the creation
+    # *and* then intersects to nothing: every pull request arrives with no
+    # labels at all. This repository has no `dependencies` and no
+    # `github_actions` label (measured with `gh label list`), so the branch
+    # that creates them is the one worth taking.
+    #
+    # `target-branch` is absent too, for a plainer reason: its default is the
+    # default branch, which is what is wanted, and setting it has documented
+    # interactions with security updates that this repository has no reason to
+    # take on.
+    #
+    # `insecure-external-code-execution` is likewise absent. Its default is
+    # `deny`; zizmor's `dependabot-execution` audit fires on `allow`, and the
+    # quiet way to satisfy that audit is to not write the key.

@@ -100,21 +100,28 @@
 # this one.
 #
 # All five lock files here agree today and nothing compares them, which is worth
-# stating plainly rather than leaving as an implied guarantee. The alignment is
-# maintained by whoever refreshes them, so the standing obligation is on the
-# scheduled provider lock refresh: it has to cover child modules and not only
-# the roots under envs/ and bootstrap/. Bump those and forget this one and the
-# divergence lands in silence, which is the exact failure committing this file
-# was meant to prevent.
+# stating plainly rather than leaving as an implied guarantee. That obligation
+# was written here as a standing one on whatever refreshed them, and
+# .github/workflows/provider-lock-refresh.yml is now what does: it discovers its
+# work by finding every committed .terraform.lock.hcl rather than by naming the
+# roots, so this file and the module's examples/default/ are covered by the same
+# pass that covers envs/ and bootstrap/, and all five move in one commit or
+# none. "Bump those and forget this one" is no longer a way for the divergence
+# to arrive.
+#
+# What is left is narrower and still uncovered: a hand edit to one lock file, or
+# a root added later whose lock file was never committed, which that workflow
+# discovers nothing about because there is nothing to discover.
 #
 # A mechanical check was considered and deliberately deferred rather than
-# written here. Comparing locks across roots is not a one-liner — they hold
-# different provider sets, so "in sync" means "agree on every provider both
-# record", not "identical" — and the refresh is what decides whether that is
-# even the right invariant or whether a module should be allowed to lag. Writing
-# the check before the mechanism it constrains would be guessing at its
-# contract; writing the obligation down where the next person to touch this file
-# will read it costs nothing and expires only when the check exists.
+# written here, and the deferral still holds for the reason it was given.
+# Comparing locks across roots is not a one-liner — they hold different provider
+# sets, so "in sync" means "agree on every provider both record", not
+# "identical" — and it is a question about whether a module should be allowed to
+# lag, which nothing has needed to answer. What has changed is the size of the
+# thing it would catch: the routine path now produces all five together, so such
+# a check would be guarding against a hand edit rather than against the
+# automation.
 
 provider "aws" {
   region = "eu-west-1"

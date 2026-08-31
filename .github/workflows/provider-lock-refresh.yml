@@ -1,0 +1,402 @@
+# Move the committed Terraform provider versions forward, on a schedule, as a
+# pull request that is reviewed like any other change.
+#
+# Five `.terraform.lock.hcl` files live in this repository — `bootstrap/`,
+# `envs/stage/`, `envs/prod/`, `modules/static-site/` and that module's
+# `examples/default/` — and they are byte-identical to each other on purpose.
+# `envs/prod/versions.tf` says why in the place it matters most: an environment
+# that could resolve a different provider version from the one it was promoted
+# from is an environment nobody has actually tested. Nothing enforces that
+# equality, so the thing that maintains it has to produce all five in one
+# change or none.
+#
+# That is the first reason this is a workflow rather than a line in
+# .github/dependabot.yml. The second is what Dependabot would write into those
+# files, and it is argued at length there: an updater that resolves on one
+# platform records one `h1:` hash, and a lock file narrowed to one platform
+# does not fail — it stops being a lock and starts rewriting itself under
+# whoever reaches it first.
+#
+# ---------------------------------------------------------------------------
+# What it runs, and why the second command is not optional
+# ---------------------------------------------------------------------------
+#
+# Per directory, `init -backend=false -upgrade` and then
+# `providers lock -platform=linux_amd64 -platform=darwin_arm64`. Both, in that
+# order, and neither is decoration:
+#
+#   * The order is forced. `terraform providers lock` in a root that calls a
+#     module errors with `Module not installed` until `init` has run, which is
+#     three of the five directories here.
+#
+#   * The second command is what makes the lock cover two platforms. Measured
+#     at Terraform 1.15.9 in `modules/static-site/examples/default`, from an
+#     empty state: `init -backend=false -upgrade` alone leaves two `h1:` lines
+#     in the file — one per provider, for the platform it resolved on — and
+#     the following `providers lock` takes it to four. That is the whole
+#     difference between this workflow and the Dependabot update it replaces,
+#     reproduced directly.
+#
+# The two platforms are the two this repository is used from: `linux_amd64` is
+# every runner in .github/workflows/, `darwin_arm64` is the machine it is
+# developed on. They are what the committed files already record, and both
+# were identified by generating each platform's hashes separately and matching
+# them against the committed strings rather than by counting `zh:` lines,
+# which are release-wide and say nothing about platform coverage.
+#
+# ---------------------------------------------------------------------------
+# It reaches no AWS account, and that is a property to keep
+# ---------------------------------------------------------------------------
+#
+# Both commands talk to the Terraform registry and to nothing else. Measured
+# with `AWS_SHARED_CREDENTIALS_FILE=/dev/null`, `AWS_CONFIG_FILE=/dev/null`,
+# `AWS_EC2_METADATA_DISABLED=true` and every `AWS_*` variable unset: all ten
+# invocations exit 0. So this file sits on validate.yml's side of the line —
+# no `environment:`, no OIDC, no `id-token: write` — and the pull request it
+# opens is where the AWS-facing check happens, in plan.yml, under review.
+#
+# If a step is ever added here that needs credentials, it belongs in a
+# different workflow. The value of this one is that a provider bump can be
+# proposed by something that could not apply it.
+#
+# ---------------------------------------------------------------------------
+# Why the pull request cannot be opened with GITHUB_TOKEN
+# ---------------------------------------------------------------------------
+#
+# GitHub raises no workflow events for actions taken with the default token,
+# so a pull request opened with it gets no validate.yml run and no plan.yml
+# run: it reports on none of the nine checks `main` requires and is blocked
+# permanently, in a way that reads like the ruleset misbehaving.
+#
+# That is the general rule, and here it bites harder than usual. This pull
+# request touches `modules/static-site/.terraform.lock.hcl`, and plan.yml's
+# `detect` job treats any change under `modules/` as shared across
+# environments — so it selects every environment and requires a real plan
+# against real state. plan.yml says the reason out loud: "A provider bump is
+# the last change that should land without a plan." A pull request that can
+# never run that plan is the one shape this change must not take.
+#
+# Hence `PROVIDER_LOCK_TOKEN`, a fine-grained token with `contents: write` and
+# `pull-requests: write` scoped to this repository. docs/BOOTSTRAP.md section 8
+# creates it. The preflight step below refuses the run when it is absent
+# rather than letting the last step fail on an opaque authentication error.
+#
+# ---------------------------------------------------------------------------
+# The hardening
+# ---------------------------------------------------------------------------
+#
+# The six rules this file follows are stated once and in full at the top of
+# validate.yml, together with which of them are checked by a tool and which
+# are held by a person. Rule 6 lands somewhere slightly different here than
+# elsewhere: this is the only workflow in the repository that pushes, and it
+# still checks out with `persist-credentials: false`, because the push is made
+# with the token handed to `create-pull-request` rather than with one left in
+# `.git/config` for every step in between to read.
+
+name: provider-lock-refresh
+
+on:
+  schedule:
+    # Tuesday morning UTC, off the hour, and deliberately not Monday.
+    #
+    # Off the hour for e2e.yml's reason: GitHub queues scheduled runs and the
+    # top of the hour is where the queue is longest, so `0 4 * * 2` buys a
+    # delay and nothing else.
+    #
+    # Not Monday because e2e.yml already runs then, at 04:17, and the two
+    # would meet at a state lock rather than politely. Opening this pull
+    # request starts a plan.yml run against every environment, and a plan
+    # takes each environment's state lock; e2e.yml applies, smoke-tests and
+    # destroys `stage` while holding stage's. Both of e2e.yml's jobs are
+    # bounded at 120 minutes — deliberately loose, so that they bound a wedged
+    # runner rather than a slow one — which means a Monday slot here would
+    # have to be picked against the timeout rather than against the observed
+    # runtime. A day's separation makes the overlap impossible instead of
+    # unlikely, and it puts this proposal a day after the end-to-end run that
+    # exercised what it proposes moving away from.
+    #
+    # A scheduled workflow is disabled automatically after 60 days without
+    # repository activity, which matters more here than anywhere: a refresh
+    # that stops happening is silent and looks exactly like a week with
+    # nothing to update. The step summary below is written to tell those two
+    # apart when somebody does look.
+    - cron: "23 4 * * 2"
+
+  # On demand as well, for the case the schedule is bad at: a provider release
+  # somebody is waiting on. No inputs — the directories are discovered and the
+  # platforms are fixed, and an input for either would be an input whose only
+  # honest value is the one already written down.
+  workflow_dispatch:
+
+# Nothing by default, granted back per job below. Rule 3 at the top of
+# validate.yml.
+permissions: {}
+
+# One group, because there is one branch to push.
+#
+# Unlike plan.yml, apply.yml and e2e.yml, this workflow takes no state lock and
+# changes no infrastructure, so a cancelled run costs nothing but the
+# downloads. What it must not do is run twice at once: both runs would compute
+# the same lock files and force the same branch, and the loser of that race
+# leaves a pull request whose head is not what its own run produced.
+#
+# `cancel-in-progress: false` all the same. A dispatch arriving mid-run would
+# otherwise cancel it somewhere inside the push, and a half-updated branch is
+# worse than a run that waits ten minutes for the one ahead of it.
+concurrency:
+  group: provider-lock-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: refresh
+    runs-on: ubuntu-24.04
+    # Generous, and bounding a wedged runner rather than a slow one, as every
+    # timeout in this repository does. The work is dominated by downloads —
+    # the AWS provider fetched for two platforms in each of five directories,
+    # ten uncached fetches — so the runtime is a property of the link rather
+    # than of this repository. One observation, offered as an order of
+    # magnitude and not as a number to hold this timeout against: a little
+    # under ten minutes on a residential connection, and a runner on a
+    # different link is a different figure. Thirty is picked to leave room for
+    # a slow registry rather than to sit just above a measurement, and what it
+    # exists to stop is a hung job reaching GitHub's six-hour default.
+    timeout-minutes: 30
+    permissions:
+      # Only what the checkout needs. The push and the pull request are made
+      # with PROVIDER_LOCK_TOKEN, which is not this token and is not widened
+      # by anything written here.
+      contents: read
+    steps:
+      # First, before ten minutes of downloads, because both of these make the
+      # run incapable of producing a pull request and neither gets better
+      # later.
+      - name: Check that this run can open a pull request
+        env:
+          # Passed through the environment rather than interpolated into the
+          # script, which is the rule every `run:` block in this repository
+          # follows regardless of how trusted the value is.
+          PROVIDER_LOCK_TOKEN: ${{ secrets.PROVIDER_LOCK_TOKEN }}
+          REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          if [ -z "$PROVIDER_LOCK_TOKEN" ]; then
+            echo "::error::PROVIDER_LOCK_TOKEN is not set, so this run could" \
+              "compute the lock files and then fail to open a pull request." \
+              "docs/BOOTSTRAP.md section 8 creates it."
+            exit 1
+          fi
+          # A dispatch is allowed from any ref, and from anything but the
+          # default branch it would push the same fixed branch name at a
+          # different base — clobbering whatever the last scheduled run left
+          # open. Refusing is cheaper than making the branch name depend on
+          # the ref, which would leave stale branches nobody closes.
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::this workflow opens a pull request against main" \
+              "from a fixed branch name, so it only runs on main; got ${REF}"
+            exit 1
+          fi
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Rule 6, and it is not a formality on the one workflow that pushes.
+          # `create-pull-request` pushes with its own `token:` input, so the
+          # job's token has no reason to be left in `.git/config` where the
+          # Terraform steps below — which resolve modules and talk to a
+          # registry — could read it.
+          persist-credentials: false
+
+      - name: Read the pinned Terraform version
+        id: terraform-version
+        # As in apply.yml and e2e.yml: setup-terraform has no version-file
+        # input and defaults to `latest`, so .terraform-version is read here
+        # and passed in explicitly, and the value is checked rather than
+        # interpolated straight into the output. An empty one is not an error
+        # setup-terraform reports — it falls back toward `latest` — and this
+        # workflow writes lock files into a pull request. A lock refreshed by
+        # an unpinned Terraform is a lock this repository did not choose.
+        shell: bash
+        run: |
+          version="$(cat .terraform-version)"
+          if [ -z "$version" ]; then
+            echo "::error::.terraform-version is empty; the lock files would" \
+              "be rewritten by an unpinned Terraform"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.terraform-version.outputs.version }}
+          # The wrapper only exists to capture stdout as step outputs, which
+          # nothing here consumes.
+          terraform_wrapper: false
+
+      - name: Refresh every committed lock file
+        shell: bash
+        # Discovery rather than a list of five directories, which is the rule
+        # `make validate`, `make test` and `make audit-policy` each arrived at
+        # for their own work: a target that enumerates its inputs is a target
+        # that silently stops covering the input added after it was written.
+        #
+        # The predicate is the lock file itself, not `*.tf`. That makes the
+        # set exactly "the lock files this repository commits", which is
+        # tautologically the set this workflow maintains — there is no
+        # committed lock file it can miss. The two predicates select the same
+        # five directories today, measured; what separates them is the sixth
+        # root somebody adds later. On `*.tf` this workflow would *create* a
+        # lock file for it, inside a pull request titled "refresh", for a
+        # directory nobody had decided should have one.
+        #
+        # The gap that leaves, stated rather than discovered: a new root whose
+        # author never committed its `.terraform.lock.hcl` is invisible here,
+        # and nothing in this repository fails because of it. What makes that
+        # narrow rather than theoretical is that `make validate` runs
+        # `init -backend=false` in every directory with `.tf` files and writes
+        # the file as a side effect, the pre-commit hook runs `make validate`
+        # on every commit touching Terraform, and the file is not gitignored —
+        # so it exists and is untracked in the working tree before the root's
+        # first commit, where `git status` shows it.
+        #
+        # A `while read` loop over a here-string rather than `mapfile`, unlike
+        # plan.yml's `detect`. The difference is who is expected to run it:
+        # `detect` only ever runs on a runner, and this loop is one somebody
+        # reproduces locally when this workflow's pull request needs
+        # explaining. macOS ships bash 3.2, which has no `mapfile`, and this
+        # form is what the three Makefile targets above already use. It was
+        # run to completion outside CI before it was committed, which is the
+        # point of writing it this way.
+        run: |
+          dirs="$(
+            find . -type d -name .terraform -prune -o \
+              -type f -name .terraform.lock.hcl -print \
+              | sed 's|/[^/]*$||' \
+              | sort -u
+          )"
+
+          if [ -z "$dirs" ]; then
+            echo "::error::no .terraform.lock.hcl found under the repository" \
+              "root. This workflow discovers its own work, so an empty result" \
+              "is a pass that refreshed nothing rather than a repository with" \
+              "nothing to refresh."
+            exit 1
+          fi
+
+          printf 'refreshing %s lock file(s):\n%s\n\n' \
+            "$(printf '%s\n' "$dirs" | wc -l | tr -d ' ')" "$dirs"
+
+          while IFS= read -r dir; do
+            echo "==> ${dir}"
+            terraform -chdir="$dir" init -backend=false -input=false -upgrade
+            # Both platforms, every time. Without this the file above records
+            # only the runner's, which is the failure .github/dependabot.yml
+            # excludes the terraform ecosystem over.
+            terraform -chdir="$dir" providers lock \
+              -platform=linux_amd64 \
+              -platform=darwin_arm64
+          done <<< "$dirs"
+
+      # A run that found nothing and a run that never happened look identical
+      # from the Actions list — both are a green tick — and the scheduled
+      # workflows in this repository are disabled automatically after 60 days
+      # of inactivity. So the outcome is written down in the log and in the
+      # step summary rather than inferred from whether a pull request appeared.
+      - name: Report what moved
+        id: changes
+        shell: bash
+        run: |
+          if git diff --quiet -- '**/.terraform.lock.hcl'; then
+            echo "no change: every committed lock file is already current"
+            {
+              echo "### Provider lock refresh"
+              echo
+              echo "No change. Every committed \`.terraform.lock.hcl\` already"
+              echo "records the newest release each constraint admits."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            git --no-pager diff --stat -- '**/.terraform.lock.hcl'
+            {
+              echo "### Provider lock refresh"
+              echo
+              echo '```'
+              git --no-pager diff --stat -- '**/.terraform.lock.hcl'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Open the pull request
+        id: pull-request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          # Not the default `${{ github.token }}`. The reason is the section
+          # near the top of this file: a pull request opened with the default
+          # token raises no workflow events and can therefore satisfy none of
+          # the nine checks main requires.
+          token: ${{ secrets.PROVIDER_LOCK_TOKEN }}
+          # Only the lock files. The `.terraform/` directories the init step
+          # creates are gitignored and would not be committed anyway; naming
+          # the paths makes the pull request's file set an assertion rather
+          # than a consequence, which matters because plan.yml's `detect` job
+          # decides what to plan by reading exactly that set.
+          add-paths: "**/.terraform.lock.hcl"
+          branch: ci/provider-lock-refresh
+          # Nothing here reopens a closed refresh, so a branch left behind
+          # after one is closed unreviewed would sit there being stale.
+          delete-branch: true
+          # Subject and title agree, and both satisfy the Conventional Commits
+          # pattern the required `pr-title` check enforces — this pull request
+          # has to be mergeable by the same rules as a human one.
+          title: "ci: refresh the Terraform provider lock files"
+          commit-message: |
+            ci: refresh the Terraform provider lock files
+
+            Opened by .github/workflows/provider-lock-refresh.yml. Every
+            committed .terraform.lock.hcl re-resolved against the constraints
+            in versions.tf and re-locked for linux_amd64 and darwin_arm64.
+          # The action's default author is the actor that triggered the run,
+          # and on an unattended schedule there is no such person — whichever
+          # account GitHub reports would be attribution nobody chose. Both
+          # halves are pinned to the same bot instead, so the commit says what
+          # made it.
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          body: |
+            Every committed `.terraform.lock.hcl`, re-resolved against the
+            constraints already in `versions.tf` and re-locked for
+            `linux_amd64` and `darwin_arm64`. No `versions.tf` is touched:
+            this moves what is locked, never what is allowed.
+
+            **What to check before merging.**
+
+            - The five lock files are still byte-identical to each other.
+              `envs/prod/versions.tf` explains why that matters — an
+              environment that resolves a different provider version from the
+              one it was promoted from is an environment nobody has tested.
+            - Each provider carries two `h1:` hashes, one per platform. One
+              is a lock narrowed to whatever resolved first.
+            - `plan-gate` is not enough on its own here. This diff touches
+              `modules/`, so plan.yml selects every environment and there is a
+              real plan to read.
+
+            Opened by `.github/workflows/provider-lock-refresh.yml`.
+
+      - name: Report the pull request
+        env:
+          OPERATION: ${{ steps.pull-request.outputs.pull-request-operation }}
+          NUMBER: ${{ steps.pull-request.outputs.pull-request-number }}
+          URL: ${{ steps.pull-request.outputs.pull-request-url }}
+        shell: bash
+        run: |
+          if [ -z "$OPERATION" ]; then
+            echo "no pull request: there was nothing to propose"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "No pull request opened." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "pull request ${OPERATION}: #${NUMBER} ${URL}"
+          {
+            echo
+            echo "Pull request ${OPERATION}: [#${NUMBER}](${URL})"
+          } >> "$GITHUB_STEP_SUMMARY"
