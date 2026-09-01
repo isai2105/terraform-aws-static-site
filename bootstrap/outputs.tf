@@ -61,6 +61,23 @@ output "ci_apply_role_arns" {
   value = { for environment, role in aws_iam_role.apply : environment => role.arn }
 }
 
+output "app_deploy_boundary_policy_name" {
+  description = "Name of the permissions boundary the app repository's deploy role must carry, when the static-site module creates that role. The module takes this as an input and composes the ARN from it."
+
+  # The name rather than the ARN, because a name is the same string in every
+  # account and an ARN is not. The module will need this value in a committed
+  # tfvars, and a policy ARN embeds the account id.
+  #
+  # The module turns it back into an ARN by composition — partition, account id,
+  # `policy/`, this name — the shape `local.app_deploy_boundary_arn` uses in
+  # oidc.tf for the same value. Deliberately not `data "aws_iam_policy"`: that
+  # would need a policy read, and neither `iam:GetPolicy` nor `iam:ListPolicies`
+  # is granted to any role in `oidc.tf`, so a lookup would fail on the module's
+  # first plan and the fix would be another hand-apply of this root. Composition
+  # needs no grant at all.
+  value = aws_iam_policy.app_deploy_boundary.name
+}
+
 output "site_bucket_name_prefix" {
   description = "Required name prefix for site buckets. The apply roles share one S3 grant and it is scoped to this pattern, deliberately disjoint from the state bucket's name, so a bucket named outside it cannot be created by CI."
   value       = local.site_bucket_prefix

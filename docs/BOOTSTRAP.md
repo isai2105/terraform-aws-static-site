@@ -113,12 +113,14 @@ deliberately not self-hosting — it is the root that creates the bucket remote 
 so there is nowhere to put remote state until it has already run.
 
 That file is also the only place the state bucket's `random_id` suffix is remembered. Lose it
-and the bucket, the provider and every role have to be adopted back in one `terraform import`
-at a time, against a bucket name you can only recover by listing the account. Count the roles
-before you start: it is the plan role plus **one apply role per name in `environments`**, so a
-recovery that imports the bucket, the provider and two roles is short by one for every
-environment past the first, and finds out at the next apply with an `EntityAlreadyExists` on a
-role it never imported.
+and the bucket, the provider, the app-deploy boundary policy and every role have to be adopted
+back in one `terraform import` at a time, against a bucket name you can only recover by listing
+the account. Count the roles before you start: it is the plan role plus **one apply role per
+name in `environments`**, so a recovery that imports the bucket, the provider and two roles is
+short by one for every environment past the first, and finds out at the next apply with an
+`EntityAlreadyExists` on a role it never imported. The boundary policy is the same trap in a
+resource nobody thinks to count, because it is the only customer-managed policy in the
+bootstrap root.
 
 Back it up somewhere outside the working copy.
 
@@ -128,13 +130,14 @@ Back it up somewhere outside the working copy.
 terraform -chdir=bootstrap output
 ```
 
-The four that matter downstream:
+The five that matter downstream:
 
 | Output | Used by |
 |---|---|
 | `backend_init_command` | the literal `init -backend-config=…` line for an environment root |
 | `repository_variable_commands` | the `gh variable set` calls in sections 6 and 7.4 |
 | `oidc_provider_arn` | the `static-site` module, when it creates the app repository's deploy role |
+| `app_deploy_boundary_policy_name` | the same module, for the same role — the permissions boundary it will have to carry |
 | `site_bucket_name_prefix` | the name every site bucket must be created under (section 10) |
 
 `terraform -chdir=bootstrap output -raw <name>` prints one without quoting, which is what you
@@ -704,11 +707,18 @@ this root's own `prevent_destroy` guard. This file covers standing the platform 
 
 ## 10. Tearing down the bootstrap
 
-The state bucket and the OIDC provider are the only things in this design that outlive a cycle,
-and removing them is the last step of a teardown rather than an operation of its own. The full
-procedure — every environment destroyed and swept first, the versioned bucket emptied, then the
+The state bucket, the OIDC provider and the app-deploy boundary policy are the only things in
+this design that outlive a cycle, and removing them is the last step of a teardown rather than
+an operation of its own. The full procedure — every environment destroyed and swept first, the versioned bucket emptied, then the
 uncommitted `prevent_destroy` hand edit and the `git checkout -- bootstrap/state.tf` that
 reverts it — is `docs/TEARDOWN.md` section 8, where it sits in the order it has to run in.
+
+`<name_prefix>-app-deploy-boundary`, the managed policy section 3 creates and section 5's
+`app_deploy_boundary_policy_name` names, is destroyed with this root like everything else — and
+it is the one resource here that can refuse. IAM answers `DeletePolicy` with a `DeleteConflict`
+while the policy is still attached to anything, and a permissions boundary counts as an
+attachment. `docs/TEARDOWN.md` section 8 carries the pre-flight check, at the point it has to
+run.
 
 One caveat belongs here too, because it is a consequence of section 3: if you imported a
 pre-existing OIDC provider rather than creating one, it has to be removed from state before that

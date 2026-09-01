@@ -11,5 +11,6 @@ secrets.tfvars
 backend.hcl
 tradeoffs.md
 EXECUTION_PLAN.md
+PHASE5_TRIAGE.md
 !example.tfvars
 !envs/*/terraform.tfvars

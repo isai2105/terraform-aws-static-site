@@ -176,6 +176,27 @@ locals {
   # across IAM: this is the only role either CI identity may touch.
   app_deploy_role_arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/react-cloudfront-app-deploy-*"
 
+  # The permissions boundary that role must carry, composed rather than read
+  # back from `aws_iam_policy.app_deploy_boundary.arn`.
+  #
+  # That distinction is not stylistic. The condition on the statement that
+  # creates the deploy role names this ARN, so referencing the resource makes
+  # the whole policy document unknown until the policy exists — and applied to a
+  # bootstrap that already stands, which is the case that matters here, each
+  # apply role's identity policy is then an update-in-place whose `policy`
+  # renders as the *removal* of every existing grant followed by
+  # `(known after apply)`. The operator hand-applying this root would be asked to
+  # approve a diff showing IAM permissions disappearing and nothing about the
+  # split, the condition or the denies that replace them. A security control
+  # nobody can see in the plan that installs it is a control on trust.
+  #
+  # Composing it costs nothing: the name is ours, the account id and partition
+  # are already in hand, and this is the shape `app_deploy_role_arn` above
+  # already uses. It is also exactly what `outputs.tf` tells the downstream
+  # module to do with the same value.
+  app_deploy_boundary_name = "${var.name_prefix}-app-deploy-boundary"
+  app_deploy_boundary_arn  = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/${local.app_deploy_boundary_name}"
+
   # The log groups CloudFront access logs are delivered into.
   #
   # Pinned to us-east-1 rather than to var.aws_region, and that is a property of
@@ -541,9 +562,25 @@ resource "aws_iam_role_policy" "plan_state" {
 #     `iam:UpdateAssumeRolePolicy` on `role/react-cloudfront-app-deploy-*`,
 #     which is one pattern spanning every environment rather than one grant per
 #     role. So the stage role can rewrite prod's app deploy role — its trust
-#     policy and its inline policy both. The escalation exit stays closed,
-#     because `DenyRoleChaining` refuses `sts:AssumeRole` on `*`, but the reach
-#     is real and it predates this split rather than being introduced by it.
+#     policy and its inline policy both. The reach is real and it predates this
+#     split rather than being introduced by it.
+#
+#     `DenyRoleChaining` does not cap it, though it reads as though it should:
+#     that deny binds this identity, while the assume at the end of such an
+#     escalation is performed by GitHub against the rewritten trust policy — a
+#     different principal entirely. What caps it is the permissions boundary the
+#     conditioned half of `apply_identity` requires, which holds prod's deploy
+#     role to three services whoever rewrote it.
+#
+#     Read that cap precisely. The boundary is one policy shared by every
+#     environment, and its resources are `<prefix>-site-*` and `distribution/*`
+#     — both environments by construction, and in the CloudFront case every
+#     distribution in the account. So the residual is not nothing: it is
+#     object-level write, delete included, on the production site bucket, plus
+#     invalidation of any distribution. What the boundary removes is the
+#     conversion of that reach into a durable identity; it buys no environment
+#     isolation, and per-environment boundaries are not available without one
+#     policy per environment and a condition per role.
 #
 # A deliberate raw-API call against a known identifier is therefore exactly as
 # possible as it was before this split, through either of those two policies.
@@ -1216,6 +1253,233 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   }
 }
 
+# The permissions boundary the deploy role is required to carry.
+#
+# A boundary is a ceiling, not a grant: it caps what the role can ever hold, and
+# the role's own inline policy still has to allow an action for the role to have
+# it. The two controls answer different questions, and confusing them is how a
+# boundary ends up either useless or brittle:
+#
+#   - the inline policy is the ceiling on *verb* — this role may write objects
+#     but not delete them, and step by step it is least privilege;
+#   - this boundary is the ceiling on *class* — whatever inline policy is
+#     written onto the role, by this repository or by someone who has taken over
+#     the identity that creates it, the role reaches three services and no
+#     others, and never IAM or STS.
+#
+# So the list here is deliberately a superset of the inline policy the module
+# will write onto that role: `s3:DeleteObject` will be granted at the ceiling
+# and withheld at the verb. Making them identical looks tighter and is worse —
+# the boundary can only be widened by a hand-applied change to this root, landed
+# before the change that needs it,
+# so a boundary that is an exact copy turns every ordinary permission adjustment
+# in the app repository into a two-repository lockstep with a privileged apply
+# in the middle. `s3:AbortMultipartUpload` is the case that would have bitten
+# first: `aws s3 sync` uses multipart above 8 MB and calls it on a failed part,
+# so its absence would surface as a confusing secondary error and leave billable
+# incomplete uploads behind.
+#
+# The resources are scoped, and that is a control in its own right rather than
+# tidiness. `resources = ["*"]` would put every bucket in the account inside the
+# ceiling. Under exactly the threat model this boundary exists to answer — the
+# deploy role's inline policy attacker-written, the boundary the only remaining
+# cap — that is object write across the account from a credential that should
+# reach one site bucket.
+#
+# The state bucket specifically is closed twice over: by these patterns, and by
+# the explicit `DenyStateBucket` below, which is there so the exclusion survives
+# a later edit that widens them. Neither is redundant, and the deny is the one
+# to keep if only one survives. The patterns are the same ones the CI grants
+# use, so they hold as environments are added.
+data "aws_iam_policy_document" "app_deploy_boundary" {
+  # Verb families rather than named actions, because a ceiling enumerated action
+  # by action is an action ceiling wearing a class ceiling's justification. The
+  # deploy will reach for `GetObjectVersion`, `PutObjectTagging` or
+  # `GetParametersByPath` sooner or later, and under an enumeration each of
+  # those is a privileged hand-apply of this root,
+  # landed before the app repository change that needs it.
+  #
+  # Bucket *configuration* is outside the families: no `PutBucketPolicy`, no
+  # `PutBucketAcl`, no `PutBucketPublicAccessBlock`. Those are the S3 calls that
+  # change who can reach the content rather than what the content is, and a
+  # deploy credential has no business with them.
+  #
+  # Two escape through the wildcard anyway, and the deny below is what actually
+  # keeps that sentence true. `s3:*Object*` matches 50 of S3's actions, and
+  # `PutBucketObjectLockConfiguration` and `GetBucketObjectLockConfiguration`
+  # are among them despite carrying the *bucket* resource type — the name
+  # contains "Object", the glob does not care where.
+  statement {
+    sid    = "SiteObjects"
+    effect = "Allow"
+
+    actions = [
+      "s3:*Object*",
+      "s3:AbortMultipartUpload",
+      "s3:GetBucketLocation",
+      "s3:ListBucket",
+      "s3:ListBucketMultipartUploads",
+      "s3:ListMultipartUploadParts",
+    ]
+
+    resources = local.site_bucket_arns
+  }
+
+  # `Get*` and not `ssm:*`: reading a published parameter is the deploy's job,
+  # writing one is the environment root's, and nothing here should be able to
+  # rewrite the contract it consumes.
+  #
+  # No kms:Decrypt anywhere in this document, and that is a contract rather than
+  # an omission: the module will publish these as `String`, not `SecureString`,
+  # so no decrypt is needed — and a later switch to `SecureString` would fail
+  # here rather than silently widening what a deploy credential can read.
+  statement {
+    sid    = "ReadPublishedParameters"
+    effect = "Allow"
+
+    actions = ["ssm:Get*"]
+
+    resources = [local.ssm_parameter_arn_pattern]
+  }
+
+  statement {
+    sid    = "InvalidateSiteDistributions"
+    effect = "Allow"
+
+    # `CreateInvalidation` is the only write. `Get*` and `List*` are reads on a
+    # distribution and cannot change one — `cloudfront:*` would have carried
+    # `DeleteDistribution`, which is the single most destructive call in this
+    # account and belongs nowhere near a deploy credential.
+    actions = [
+      "cloudfront:CreateInvalidation",
+      "cloudfront:Get*",
+      "cloudfront:List*",
+    ]
+
+    resources = local.site_distribution_arns
+  }
+
+  # The exclusions the `s3:*Object*` glob would otherwise swallow.
+  #
+  # `PutBucketObjectLockConfiguration` is the one that matters: a COMPLIANCE-mode
+  # default retention cannot be shortened or lifted by anyone, the account root
+  # included. Every object written afterwards becomes immutable for the retention
+  # period and the bucket can never be deleted — the permanent form of the orphan
+  # class docs/TEARDOWN.md exists to prevent, reachable from a deploy credential.
+  #
+  # It is unreachable today only because Object Lock requires versioning, the
+  # module leaves versioning off, and `s3:PutBucketVersioning` is not matched by
+  # the glob. That is three facts in another repository's module holding up a
+  # ceiling in this one, and the module's own comment already says a durable
+  # deployment should turn versioning on. A ceiling that depends on a setting it
+  # does not control is not a ceiling.
+  #
+  # The ACL and retention writes go with it: those decide who can reach an object
+  # and how long it survives, which is the same authority the paragraph above
+  # withholds at bucket level.
+  #
+  # `GetBucketObjectLockConfiguration` is denied too, and it is only a read. It
+  # is here so the deny covers the glob's whole bucket-level reach rather than
+  # the half of it that is dangerous — the next person to widen `s3:*Object*`
+  # should find one exclusion to reason about, not one plus an exception.
+  statement {
+    sid    = "DenyContentAccessControl"
+    effect = "Deny"
+
+    actions = [
+      "s3:GetBucketObjectLockConfiguration",
+      "s3:PutBucketObjectLockConfiguration",
+      "s3:PutObjectAcl",
+      "s3:PutObjectLegalHold",
+      "s3:PutObjectRetention",
+      "s3:PutObjectVersionAcl",
+    ]
+
+    resources = local.site_bucket_arns
+  }
+
+  # Explicit rather than implicit, for the reason `DenyStateMutation` on the
+  # plan role is explicit: an allow cannot override it, so the exclusion
+  # survives a later edit that widens the statements above rather than depending
+  # on nobody making that edit. It matters more here than there, for the reason
+  # the `apply_identity` comment below gives about resource-based policies.
+  statement {
+    sid    = "DenyStateBucket"
+    effect = "Deny"
+
+    actions = ["s3:*"]
+
+    resources = [
+      aws_s3_bucket.state.arn,
+      "${aws_s3_bucket.state.arn}/*",
+    ]
+  }
+}
+
+# The only customer-managed policy in this root, and the exception is forced
+# rather than chosen: a permissions boundary can only be a managed
+# policy. `aws_iam_role_policy` cannot express one.
+#
+# It is created here because it can only be created here. `iam:CreatePolicy` is
+# withheld from every apply role — that is the contract the deploy role's inline
+# policy rests on — so the module that creates the deploy role cannot create the
+# boundary it must attach. The one place that can is the one applied by hand.
+#
+# It has no lifecycle tie to any role, which is the opposite of the property the
+# inline-policy comment further down argues for. That is the cost of the
+# exception: destroying an environment leaves this policy standing. It is
+# intended to — it outlives every environment and is removed only by the
+# bootstrap destroy, which is why
+# docs/TEARDOWN.md section 6 lists it as out of scope for a per-environment
+# sweep and section 8 carries the check that it is unattached first.
+#
+# `name` and `description` are both replacement-forcing — IAM has no update API
+# for a *managed policy's* description, whatever it offers for a role's — and a
+# replacement cannot succeed while any deploy role carries this boundary,
+# because a boundary counts as an attachment and
+# DeletePolicy answers DeleteConflict. So an idle reword of that sentence plans
+# a destroy/create and fails mid-apply, in a root that is applied by hand. Do
+# not edit either while an environment is standing. The policy *body* is safe to
+# edit: it becomes a new policy version in place.
+resource "aws_iam_policy" "app_deploy_boundary" {
+  name = local.app_deploy_boundary_name
+
+  # Explicit at its default, because `local.app_deploy_boundary_arn` composes the
+  # ARN without one and the two have to agree. Written here rather than left
+  # implicit so the assumption is visible in the block a future editor would
+  # change, instead of only in a local 1,200 lines up.
+  path = "/"
+
+  description = "Ceiling for the app repository's deploy role. Attached as a permissions boundary, never as a policy."
+  policy      = data.aws_iam_policy_document.app_deploy_boundary.json
+}
+
+# The one thing composing the ARN gives up, bought back.
+#
+# `local.app_deploy_boundary_arn` shares its name with the resource, so the two
+# cannot disagree about that — but the composition also fixes `path` at the
+# default by omitting it, and nothing links the two otherwise. Setting `path` on
+# the policy above would move its real ARN, leave the condition naming the old
+# one, and show no diff whatsoever on either apply role: the next environment
+# apply would fail `AccessDenied` on `iam:CreateRole` with nothing in any plan
+# pointing at the cause.
+#
+# A `check` block names it. Not a `lifecycle { postcondition }`, which would hard
+# fail: this is a drift detector, and a drift detector that blocks an apply also
+# blocks the apply that would fix the drift. The cost is the honest one — a check
+# assertion is always a warning, never an error, so it reports rather than stops,
+# and a warning in a long plan is easy to miss. At plan time on the apply that
+# introduces a `path`, the ARN is unknown and the assertion is skipped with a
+# "known after apply" note, so the mismatch is reported after the policy has
+# already moved. Setting `path` explicitly on the resource below is what keeps
+# that from being the first anyone hears of it.
+check "app_deploy_boundary_arn_matches" {
+  assert {
+    condition     = aws_iam_policy.app_deploy_boundary.arn == local.app_deploy_boundary_arn
+    error_message = "local.app_deploy_boundary_arn no longer matches aws_iam_policy.app_deploy_boundary.arn. Most likely cause: a `path` was set on the policy. Two consequences, and the quiet one matters more: the apply roles condition iam:CreateRole on the composed value, so the deploy role can no longer be created — loud, on the next environment apply; and DenyBoundaryPolicyEdit names the composed value too, so it now protects a policy that does not exist and the real boundary can be rewritten with CreatePolicyVersion and SetDefaultPolicyVersion."
+  }
+}
+
 # The one grant in this file that can be turned into more than it is, which is
 # why it is separated from the rest rather than folded into the statement list
 # above.
@@ -1223,39 +1487,89 @@ data "aws_iam_policy_document" "apply_infrastructure" {
 # The static-site module creates the app repository's deploy role, so apply
 # needs IAM write — and IAM write is how a scoped role becomes an unscoped one.
 # The path is short: create a role, put an administrator policy on it, write a
-# trust policy naming yourself, assume it. The name pattern below closes the
-# first step for every role except the one this repository legitimately owns,
-# and the deny closes the last step outright — nothing in this repository ever
-# calls sts:AssumeRole, so refusing it costs nothing and removes the exit from
-# the escalation.
+# trust policy naming an identity you control, let that identity assume it. The
+# name pattern below closes the first step for every role except the one this
+# repository legitimately owns.
 #
-# That is a mitigation, not a proof. The rigorous control is a permissions
-# boundary: require, with an iam:PermissionsBoundary condition, that any role
-# this identity creates carries a boundary it cannot itself edit. That needs the
-# boundary policy to exist and the module to attach it, which is the commit that
-# creates the deploy role rather than this one. Recorded here so the gap is
-# visible rather than discovered.
+# `DenyRoleChaining` does not close the last step, and it is worth being explicit
+# about why, because it looks as though it should. That deny refuses
+# `sts:AssumeRole` by *this* identity. The assume at the end of the escalation
+# above is performed by GitHub, against a trust policy naming an
+# attacker-controlled OIDC subject — a different principal entirely, unaffected
+# by a deny attached here.
+#
+# What does close it is the permissions boundary, which is why it is no longer
+# deferred. The conditioned statement below refuses `CreateRole` unless the new
+# role carries `aws_iam_policy.app_deploy_boundary`, and that boundary contains
+# no `iam:*` and no `sts:*`. A role minted through this grant therefore cannot
+# be given administrator rights no matter what inline policy is written onto it,
+# and cannot be turned into a foothold for creating further roles.
+#
+# The precise claim, because the loose version of it is wrong in a way worth
+# knowing: a boundary caps what an *identity policy* can grant. AWS documents
+# that a boundary's implicit denies do not limit what a **resource-based**
+# policy grants to a session — and an identity holding the apply role can write
+# resource policies, `s3:PutBucketPolicy` on the site buckets among them. So the
+# boundary does not reduce the reach of someone who already holds the apply
+# role; it stops that reach being *converted into a durable second identity*.
+# That is the property being bought here. Where containment has to bind
+# resource-based policies too, it takes an explicit deny, which is why the
+# boundary carries one on the state bucket.
+#
+# `iam:DeleteRolePermissionsBoundary` is withheld, so the boundary cannot be
+# lifted off a role once it is on. `iam:PutRolePermissionsBoundary` is granted,
+# but only inside the same condition — it can move a role onto this boundary and
+# onto nothing else.
+#
+# The statement is split in two because the condition cannot cover all of it.
+# `iam:PermissionsBoundary` is not a supported condition key for GetRolePolicy,
+# ListAttachedRolePolicies, ListInstanceProfilesForRole, ListRolePolicies,
+# ListRoleTags, TagRole or UntagRole. The list is worth checking rather than
+# reasoning about — AWS publishes it machine-readably at
+# servicereference.us-east-1.amazonaws.com/v1/iam/iam.json — because it does not
+# follow the intuition that reads are unsupported and writes are supported. A
+# request for one of those seven carries no such key, `StringEquals` on an
+# absent key does not match, and conditioning them would deny all seven rather
+# than constrain them. They are reads and tag calls; none can create a role or
+# change what one may do.
+#
+# Everything that can is conditioned. `UpdateAssumeRolePolicy` is the one to
+# notice: it rewrites *who* may use a role, so against a role that already
+# carries permissions — one created out of band, by an admin or another
+# automation, that happens to match the wildcard below — it is a full escalation
+# on its own, with no policy ever being written.
+#
+# `UpdateRole` and `UpdateRoleDescription` are both there because IAM splits one
+# Terraform-level change across two APIs: the provider calls `UpdateRole` for
+# `max_session_duration` and `UpdateRoleDescription` for `description`. Granting
+# only the first looks complete and denies every description edit. It is the
+# same shape of gap as the missing `ListInstanceProfilesForRole` this commit
+# also closes, in the same provider file, and the same cost if it is found
+# later: a second hand-apply of this root.
+#
+# `DeleteRole` and `GetRole` support the key and are deliberately left out of
+# the condition anyway. `GetRole` is a read. `DeleteRole` is the deliberate one:
+# conditioning it would refuse to delete a role whose boundary had been stripped
+# by hand, converting a containment problem into a stranded orphan — the failure
+# class docs/TEARDOWN.md exists to prevent. Deleting a role is not an escalation,
+# so the trade goes the other way here.
 data "aws_iam_policy_document" "apply_identity" {
+  # The half that can bring a role into existence or change what it may do.
+  # Every action here is refused unless the role carries the boundary.
   statement {
-    sid    = "ManageAppDeployRole"
+    sid    = "ManageAppDeployRoleBounded"
     effect = "Allow"
 
     actions = [
       "iam:AttachRolePolicy",
       "iam:CreateRole",
-      "iam:DeleteRole",
       "iam:DeleteRolePolicy",
       "iam:DetachRolePolicy",
-      "iam:GetRole",
-      "iam:GetRolePolicy",
-      "iam:ListAttachedRolePolicies",
-      "iam:ListRolePolicies",
-      "iam:ListRoleTags",
+      "iam:PutRolePermissionsBoundary",
       "iam:PutRolePolicy",
-      "iam:TagRole",
-      "iam:UntagRole",
       "iam:UpdateAssumeRolePolicy",
       "iam:UpdateRole",
+      "iam:UpdateRoleDescription",
     ]
 
     # iam:CreatePolicy is absent, and that makes this a contract rather than an
@@ -1266,6 +1580,52 @@ data "aws_iam_policy_document" "apply_identity" {
     # orphan for the teardown checklist to catch. A managed policy would also
     # need a second ARN pattern granted here, widening this statement for no
     # gain.
+    #
+    # iam:AttachRolePolicy survives the absence of iam:CreatePolicy for one
+    # reason: AWS-managed policies need no CreatePolicy call. Without the
+    # condition below, this single action reaches AdministratorAccess without a
+    # line of policy JSON being written — which is why it belongs in this half
+    # rather than among the reads.
+    resources = [local.app_deploy_role_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = [local.app_deploy_boundary_arn]
+    }
+  }
+
+  # The half the condition does not cover. Seven of these nine cannot carry it —
+  # iam:PermissionsBoundary is not a supported condition key for them.
+  # DeleteRole and GetRole do support it and are left out deliberately, for the
+  # reason the block comment above gives.
+  #
+  # None of them can create a role or widen what one may do, which is what makes
+  # leaving them unconditioned acceptable rather than merely unavoidable.
+  #
+  # iam:ListInstanceProfilesForRole is here for the destroy path rather than for
+  # anything this repository reads. The AWS provider's role deletion calls it
+  # unconditionally before it deletes the role — ahead of, and outside, both the
+  # force-detach branches — and tolerates only NotFound from it. An AccessDenied
+  # there aborts the destroy after the inline policy is already gone, leaving a
+  # stripped role behind for the teardown checklist. It lists instance profiles,
+  # which nothing in this repository creates, so it always returns empty.
+  statement {
+    sid    = "ManageAppDeployRoleUnbounded"
+    effect = "Allow"
+
+    actions = [
+      "iam:DeleteRole",
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListInstanceProfilesForRole",
+      "iam:ListRolePolicies",
+      "iam:ListRoleTags",
+      "iam:TagRole",
+      "iam:UntagRole",
+    ]
+
     resources = [local.app_deploy_role_arn]
   }
 
@@ -1279,11 +1639,51 @@ data "aws_iam_policy_document" "apply_identity" {
     resources = [aws_iam_openid_connect_provider.github.arn]
   }
 
+  # What this deny does close, since two comments above say what it does not.
+  # Nothing in this repository calls `sts:AssumeRole` from CI — GitHub's OIDC
+  # exchange is `AssumeRoleWithWebIdentity`, a different action — so refusing it
+  # account-wide costs nothing and closes chaining by this identity into any
+  # role whose trust policy names the account root, a shape most accounts have
+  # somewhere and which has nothing to do with the deploy role above.
   statement {
     sid       = "DenyRoleChaining"
     effect    = "Deny"
     actions   = ["sts:AssumeRole"]
     resources = ["*"]
+  }
+
+  # The two denies that keep the boundary a boundary. Every action in them is
+  # already absent from the statements above, so these change nothing today;
+  # they are explicit for the reason `DenyStateBucket` in the boundary document
+  # is, and
+  # `DenyStateMutation` on the plan role before it.
+  #
+  # What they buy is specific to this control. Without them, one broad statement
+  # added later for an unrelated need dissolves the whole thing — and does so
+  # with no plan diff on any role, because no role changes. The first deny is
+  # the obvious route: lift the boundary off a role and the ceiling is gone. The
+  # second is the quiet one — `CreatePolicyVersion` plus
+  # `SetDefaultPolicyVersion` rewrites the ceiling itself, for every deploy role
+  # in the account at once, without touching a single role resource.
+  statement {
+    sid       = "DenyBoundaryRemoval"
+    effect    = "Deny"
+    actions   = ["iam:DeleteRolePermissionsBoundary"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenyBoundaryPolicyEdit"
+    effect = "Deny"
+
+    actions = [
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicy",
+      "iam:DeletePolicyVersion",
+      "iam:SetDefaultPolicyVersion",
+    ]
+
+    resources = [local.app_deploy_boundary_arn]
   }
 }
 
@@ -1298,7 +1698,14 @@ data "aws_iam_policy_document" "apply_identity" {
 # not buy headroom; moving to a managed policy (6,144 characters each, ten
 # attachable) is the escape, at the cost of the property in the first sentence
 # — and it would cost it once per environment now rather than once.
-# One consequence for anything outside this repository that mirrors these three.
+#
+# `aws_iam_policy.app_deploy_boundary` above is the one exception, and its own
+# comment says why it has to be. Note only that the lifetime argument in the
+# paragraph above is not merely inapplicable to it — it is inverted. That policy
+# is meant to outlive the roles it applies to.
+#
+# One consequence for anything outside this repository that mirrors these three
+# inline policies.
 # A local operator identity — a human-assumable role carrying the same
 # permissions, so an environment can be applied from a laptop — used to be a
 # copy of one apply role's policies. There is no single role to copy any more:
