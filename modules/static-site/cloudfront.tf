@@ -440,3 +440,22 @@ resource "aws_cloudfront_distribution" "site" {
     Name = local.bucket_name
   }
 }
+
+# Where the site is actually reachable, resolved once, in the file that owns
+# the distribution the answer comes from.
+#
+# The conditional lives here rather than in either of the two places that read
+# it — outputs.tf hands it to the environment root, ssm.tf publishes it to the
+# app repository — because two copies of a ternary are two answers, and they
+# only have to disagree once. The branch that would be got wrong is the custom
+# domain one: a consumer that prefixes `https://` onto `distribution_domain_name`
+# itself is correct for every environment in this repository today, and starts
+# handing out the wrong host the moment somebody sets `domain_name` — silently,
+# because the URL it composes still resolves and still serves a site.
+#
+# It reads `var.domain_name` rather than the distribution's own `aliases`, which
+# holds the same value. Only one of the two is known at plan time, and a test
+# asserting the resolved URL on the custom-domain path needs the one that is.
+locals {
+  site_url = "https://${local.custom_domain_enabled ? var.domain_name : aws_cloudfront_distribution.site.domain_name}"
+}

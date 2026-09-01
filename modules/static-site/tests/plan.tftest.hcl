@@ -499,6 +499,76 @@ run "security_headers" {
   }
 }
 
+# The three parameters the app repository reads, and the exact shape of what a
+# plan can say about them.
+#
+# What is checked here is the interface: which parameters exist, what they are
+# called, and what type they are. Those three facts are the whole of the
+# contract with a repository that cannot see this one — it composes the path
+# from the environment name, reads the values, and never learns anything else
+# about this module.
+#
+# Nothing here reads `.arn`, `.id`, `.value` or `.tier`, and the omission is
+# deliberate rather than an oversight to be corrected later. All four are unknown
+# until an apply, every run block in this file is `command = plan`, and an
+# unknown value in a condition is not a failing assertion — it is
+# `Error: Unknown condition value`, which aborts the run block *and skips every
+# one that follows it*. A single unwritable assertion added here would take every
+# custom-domain run block below down with it, and the summary line would report
+# them as skipped rather than as anything anyone had decided. It is the same
+# mechanism the "cache_and_header_policies_reach_the_right_behaviours" block
+# above records for a CloudFront policy id, met here on a different resource and
+# answered differently: there an override makes the unknown value knowable,
+# because the assertion is about how resources refer to each other. Here there is
+# nothing to override, because these attributes are the values themselves.
+#
+# `.tier` is the one that invites the mistake, because it is a schema default
+# that looks like a literal; the provider leaves it unknown at plan all the same.
+#
+# `.name` and `.type` are known at plan time, and they are also the two that
+# matter most. A wrong name is a deploy that fails in another repository with a
+# ParameterNotFound naming a path nobody here typed; a `SecureString` is a deploy
+# that fails there with an AccessDenied naming a KMS key, because the role that
+# reads these is written without `kms:Decrypt` precisely because these are
+# plaintext. Neither failure can surface in this repository, which is why they
+# are pinned in this repository.
+#
+# The key set is asserted as a set rather than as three separate presence checks
+# so that it fails in both directions: a parameter renamed or removed, and a
+# fourth one added without a reader being told. Both comparisons are against a
+# populated set for the reason the custom error response assertion above gives —
+# `alltrue([])` is `true`, so the "every parameter is a String" shape of this
+# would pass vacuously the day the resource stopped being created at all.
+run "published_parameters" {
+  command = plan
+
+  assert {
+    condition = toset(keys(aws_ssm_parameter.site)) == toset([
+      "bucket_name",
+      "cloudfront_distribution_id",
+      "site_url",
+    ])
+    error_message = "The module must publish exactly three SSM parameters: bucket_name, cloudfront_distribution_id and site_url. Removing or renaming one breaks the app repository's deploy; adding a fourth that nothing reads is a value published into a path with no consumer, and this assertion is where that decision gets made rather than noticed."
+  }
+
+  assert {
+    condition = toset([for parameter in aws_ssm_parameter.site : parameter.name]) == toset([
+      "/static-site/test/bucket_name",
+      "/static-site/test/cloudfront_distribution_id",
+      "/static-site/test/site_url",
+    ])
+    error_message = "The parameters must be published at /static-site/<environment>/<name>, with the environment interpolated from var.environment. The consumer composes this path from the environment name alone, so the prefix and the segment order are part of the contract and not this module's to change."
+  }
+
+  # Compared against a one-element set rather than with alltrue, which makes the
+  # emptiness above impossible to pass through here too: `toset([])` is not
+  # `toset(["String"])`.
+  assert {
+    condition     = toset([for parameter in aws_ssm_parameter.site : parameter.type]) == toset(["String"])
+    error_message = "Every parameter must be type String. SecureString would encrypt three values that are not secret — a bucket name, a distribution id and the public address of a public site — and require kms:Decrypt to read them, which the app repository's deploy role deliberately does not hold. The failure would surface in that repository's next deploy as an AccessDenied naming a KMS key, not here."
+  }
+}
+
 # The optional domain, mode one: this module requests and validates the
 # certificate through Route 53.
 #
@@ -582,4 +652,40 @@ run "a_certificate_source_with_no_domain_is_refused" {
   }
 
   expect_failures = [var.domain_name]
+}
+
+# The branch of the resolved site URL that no environment in this repository
+# takes, and the one a consumer would get wrong if it composed the URL itself.
+#
+# `local.site_url` is read by two publishers — the `site_url` output and the SSM
+# parameter of the same name — so pinning either pins the conditional they share.
+# This asserts the output, because `aws_ssm_parameter.value` is unknown at plan
+# and unreadable in a condition for the reasons "published_parameters" sets out.
+#
+# There is no companion assertion on the default path, and its absence is the
+# same fact from the other side: with no domain the URL is built from the
+# hostname AWS assigns the distribution, so it is unknown until apply. Only this
+# branch resolves to a literal, and it is also the only one that can be wrong
+# without the distribution itself being wrong.
+#
+# Last in the file on purpose, and this is the part worth not undoing. The
+# condition is known at plan time only while the conditional is intact: delete
+# the custom-domain branch and this stops being a failed assertion and becomes
+# `Error: Unknown condition value`, which skips every run block after it. Written
+# up beside the other custom-domain assertions — where it belongs on subject — a
+# single wrong edit to one local would have reported one failure and three skips.
+# Written here it can take nothing down with it, which is what makes it safe to
+# have at all.
+run "custom_domain_resolves_the_published_site_url" {
+  command = plan
+
+  variables {
+    domain_name    = "app.example.com"
+    hosted_zone_id = "Z1D633PJN98FT9"
+  }
+
+  assert {
+    condition     = output.site_url == "https://app.example.com"
+    error_message = "With a custom domain the site URL must resolve to https:// plus that domain, not to the distribution's own *.cloudfront.net hostname. This module owns that conditional precisely so that no consumer re-derives it: one that prefixed the hostname itself would be correct for every environment here today and would start serving the wrong host, without erroring, on the day a domain was set."
+  }
 }

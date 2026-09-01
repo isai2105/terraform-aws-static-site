@@ -3,9 +3,9 @@
 # The bucket name and the distribution id are the two values the app repository's
 # deploy pipeline cannot function without, and neither is knowable in advance:
 # the bucket carries a random suffix minted on every apply, and the distribution
-# id is assigned by AWS. They are published here now and republished as SSM
-# parameters later, which is how a repository that cannot see this one reads
-# them.
+# id is assigned by AWS. They are published here for the root that called this
+# module, and republished as SSM parameters in ssm.tf, which is how a repository
+# that cannot see this one — and cannot read this state — reads them.
 
 output "bucket_name" {
   description = "Name of the private S3 bucket serving as the CloudFront origin. Minted with a random suffix on every apply, so nothing downstream may hardcode it."
@@ -41,9 +41,12 @@ output "site_url" {
   # happened, which is the entire reason this is published resolved rather than
   # as a hostname a caller has to prefix and a flag it has to interpret.
   #
-  # It reads `var.domain_name` rather than the distribution's `aliases`, because
-  # the two are the same value and only one of them is known at plan time.
-  value = "https://${local.custom_domain_enabled ? var.domain_name : aws_cloudfront_distribution.site.domain_name}"
+  # The conditional itself is `local.site_url`, defined beside the distribution
+  # in cloudfront.tf, because this output is no longer its only reader: ssm.tf
+  # publishes the same resolved value to the app repository. Restating the
+  # ternary here would put a second copy of it inside the one module whose job is
+  # to make sure nobody keeps one.
+  value = local.site_url
 }
 
 output "certificate_arn" {
