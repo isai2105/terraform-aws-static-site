@@ -26,8 +26,8 @@ already been followed. Follow it top to bottom.
 The same reason `docs/BOOTSTRAP.md` gives: bucket names carry a `random_id` suffix that is
 re-minted on every cycle, distribution ids and account ids differ for every cloner, and this
 file is committed to a public repository. Placeholders — `<env>`, `<name_prefix>`, `<lock-id>`,
-`<distribution-id>` — are yours to substitute, and the transcripts below are redacted the same
-way. The commands that print the real values are named where they are needed.
+`<distribution-id>`, `<account-id>` — are yours to substitute, and the transcripts below are
+redacted the same way. The commands that print the real values are named where they are needed.
 
 ---
 
@@ -321,6 +321,34 @@ No orphan was left by either pass. The post-destroy sweep in section 6 was run a
 two-pass teardown precisely because a killed process and a `force-unlock` are when things get
 left behind, and it came back identical to the sweep after the clean run.
 
+### 5.4 A destroy that fails on the deploy role's inline policy
+
+Nothing can hit this yet — the `static-site` module creates no deploy role at this commit, and
+this section is written ahead of the contract phase that adds one. Different symptom from 5.1-5.3,
+different cause, and it sits here because the recovery is the same shape: something outside
+Terraform has to be put back before the destroy can finish.
+
+The CI apply roles may write the app deploy role's inline policy **only while that role carries
+`<name_prefix>-app-deploy-boundary`** — `bootstrap/oidc.tf` conditions `PutRolePolicy` and
+`DeleteRolePolicy` on exactly that boundary ARN. So if the boundary is ever stripped from a live
+deploy role by hand, the destroy of that environment fails with `AccessDenied` on
+`DeleteRolePolicy` and strands both the inline policy and the role — the orphan class this
+document exists to prevent. A rename or replacement of the boundary policy reaches the same
+state, but only afterwards: IAM refuses to replace a policy anything still carries, so that path
+is reachable only once a boundary has already been stripped.
+
+`DeleteRole` itself is deliberately *not* conditioned, precisely so this stays recoverable. The
+fix needs the bootstrap admin, not the CI credential:
+
+```bash
+aws iam put-role-permissions-boundary \
+  --role-name react-cloudfront-app-deploy-<env> \
+  --permissions-boundary "arn:aws:iam::<account-id>:policy/<name_prefix>-app-deploy-boundary"
+```
+
+Then re-run the destroy. If the boundary policy's ARN has genuinely changed, the bootstrap has
+to be re-applied first so the condition and the attached boundary name the same ARN again.
+
 ## 6. The post-destroy checklist
 
 A destroy exiting 0 is a claim, not evidence. Terraform reports on what was in its state file,
@@ -350,6 +378,13 @@ column of results is worth more than a number copied from the row above it.
 Every distribution this step created was confirmed individually as `NoSuchDistribution` rather
 than inferred from an exit code. That is the standard the checklist is written to: **checked and
 clean**, not "no known issues".
+
+One bootstrap-owned resource is deliberately **not** on this list.
+`<name_prefix>-app-deploy-boundary`, the managed policy the app deploy role carries as its
+permissions boundary, outlives every environment by design and is removed only by the bootstrap
+destroy in section 8. Finding it standing when this checklist runs is the expected result, not
+a leak. Section 8 carries the check that nothing is still attached to it before it comes
+down.
 
 ### 6.1 The three commands the checklist cannot be written without
 
@@ -464,14 +499,45 @@ same category of error as the 15–20 minute figure in section 3.
 
 ## 8. Tearing down the bootstrap
 
-The state bucket and the OIDC provider are the only things in this design that outlive a cycle.
-This repository treats anything that survives a destroy as a defect; the bootstrap is the honest
-exception, and an exception is only honest if its removal path is written down.
+The state bucket, the OIDC provider and the app-deploy boundary policy are the only things in
+this design that outlive a cycle. This repository treats anything that survives a destroy as a
+defect; the bootstrap is the honest exception, and an exception is only honest if its removal
+path is written down.
 
 **Destroy every environment and run section 6's sweep before touching anything here.** Emptying
 the state bucket while an environment still stands strands its infrastructure with nothing left
 that knows how to remove it. There is no undo for this and no automated detector for it
 afterwards.
+
+**Phase 0 — confirm nothing still carries the boundary.** `<name_prefix>-app-deploy-boundary`
+is a managed policy, and IAM refuses `DeletePolicy` with a `DeleteConflict` — "attached
+subordinate entities" — while any entity still has it. A permissions boundary counts as an
+attachment. The usage filter below is not what makes them visible — an unfiltered
+`list-entities-for-policy` returns every attachment — it is what makes the answer unambiguous, so
+a hit here is a boundary and not a policy someone attached by hand:
+
+```bash
+BOUNDARY="$(terraform -chdir=bootstrap output -raw app_deploy_boundary_policy_name)"
+ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+
+aws iam list-entities-for-policy \
+  --policy-arn "arn:aws:iam::${ACCOUNT}:policy/${BOUNDARY}" \
+  --policy-usage-filter PermissionsBoundary
+```
+
+Every list in the result must be empty. If one is not, an app deploy role is still standing —
+an environment root not yet destroyed, or a destroy interrupted per section 5 — and that
+environment has to come down first.
+
+This runs **first**, before a single object is deleted, and the ordering is the whole point. The
+remedy for a hit is "destroy that environment" — and an environment cannot be destroyed once
+phase 1 has emptied the state bucket its state lived in. Checking after phase 1 would hand you a
+finding whose only fix had already been removed, which is the catastrophe the warning above
+exists to prevent, reached by following the runbook in order.
+
+It is also cheap insurance against phase 2, where a `DeleteConflict` would strand you
+mid-procedure with `prevent_destroy` hand-edited out of `bootstrap/state.tf` and an uncommitted
+guard removal to remember to revert.
 
 **Phase 1 — empty the bucket.** A versioned bucket refuses to delete while any version or delete
 marker remains, and `aws s3 rm --recursive` removes neither. Note that the state objects persist
@@ -527,11 +593,12 @@ intended to. The friction is the guard: it is what stops an accidental `destroy`
 state with it. Run `git status` afterwards and confirm the working tree is clean.
 
 The bootstrap runs on local state, so `bootstrap/terraform.tfstate` is what this destroy reads.
-If it is missing, the bucket, the provider and every role have to be adopted back in one
-`terraform import` at a time first — the plan role plus one apply role per name in
-`environments`, which is three at the two environments this repository ships and grows with the
-list, not the two the older shape had. `docs/BOOTSTRAP.md` section 4 explains why that file is
-worth keeping.
+If it is missing, the bucket, the provider, the app-deploy boundary policy and every role have
+to be adopted back in one `terraform import` at a time first — the plan role plus one apply role
+per name in `environments`, which is three at the two environments this repository ships and
+grows with the list, not the two the older shape had. The boundary policy is easy to miss in
+that count: it is the only customer-managed policy in the bootstrap root.
+`docs/BOOTSTRAP.md` section 4 explains why that file is worth keeping.
 
 If you imported a pre-existing OIDC provider rather than creating one — `docs/BOOTSTRAP.md`
 section 3 — remove it from state before the destroy so it survives:
