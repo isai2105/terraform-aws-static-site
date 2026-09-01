@@ -11,7 +11,9 @@
 #      resources. Until envs/ exists, this is that root.
 #
 # It is an example rather than a deployment: no backend, no committed variable
-# values beyond the two below, and nothing in this repository ever applies it.
+# values beyond the literals below, and nothing in this repository ever applies
+# it. Every one of those literals is there because the input it feeds has no
+# default — that is what this root is for.
 #
 # Its lock file is committed and pinned to the same provider version the
 # bootstrap is locked to, deliberately rather than to whatever was newest when
@@ -81,6 +83,28 @@ provider "aws" {
   }
 }
 
+# The account's GitHub Actions OIDC provider, resolved rather than written down.
+#
+# Shown here, in the root that exists to be copied, because the alternative a
+# copier would otherwise reach for is a literal ARN in their own configuration —
+# and that ARN embeds an account id, which is exactly the material a committed
+# file should not carry.
+#
+# The `arn` form and never the `url` form: the `url` form resolves by calling
+# `ListOpenIDConnectProviders`, an action that takes no resource constraint, so
+# granting it means an account-wide `Resource: "*"` on whatever identity runs
+# the plan.
+#
+# Data sources are inert under `terraform validate`, which is all this root is
+# ever asked to do, so this costs the credential-free check nothing.
+data "aws_partition" "current" {}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_iam_openid_connect_provider" "github" {
+  arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
+}
+
 module "site" {
   source = "../../"
 
@@ -91,6 +115,23 @@ module "site" {
 
   name_prefix = "example"
   environment = "dev"
+
+  # The app repository's deploy identity. Five inputs with no defaults, so an
+  # example that left them out would no longer be an example of a correct call.
+  #
+  # The three GitHub values describe the repository that deploys into this
+  # environment — its owner and the two numeric ids GitHub embeds in the OIDC
+  # subject, read with
+  # `gh api repos/<owner>/react-cloudfront-app --jq '{owner: .owner.login, owner_id: .owner.id, repo_id: .id}'`.
+  # The boundary is the name of the policy the bootstrap root created and
+  # published as an output; the module composes the ARN from it.
+  github_oidc_provider_arn = data.aws_iam_openid_connect_provider.github.arn
+
+  app_github_owner         = "example"
+  app_github_owner_id      = "1"
+  app_github_repository_id = "2"
+
+  app_deploy_boundary_policy_name = "example-app-deploy-boundary"
 
   # Left at its default of false, which is the value any environment holding
   # something worth keeping should use. The environments in this repository all
