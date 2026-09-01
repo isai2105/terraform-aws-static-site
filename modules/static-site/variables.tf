@@ -269,3 +269,119 @@ variable "log_retention_days" {
     error_message = "The log_retention_days must be one of the retention periods CloudWatch Logs accepts: 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288 or 3653."
   }
 }
+
+# ---------------------------------------------------------------------------
+# The app repository's deploy role
+# ---------------------------------------------------------------------------
+#
+# Five inputs with no defaults, and every one of them is a value this module
+# cannot resolve for itself. Three describe an identity in another GitHub
+# repository — deliberately separate from the values that name *this* one, for
+# the reason `app_github_owner` gives — and two describe objects the bootstrap
+# root created, which nothing here can see.
+#
+# The app repository's *name* is not among them. It is a constant in iam.tf,
+# because the bootstrap scopes both apply roles to the hardcoded ARN pattern
+# `role/react-cloudfront-app-deploy-*` and a role named anything else cannot be
+# created by CI at all.
+
+variable "github_oidc_provider_arn" {
+  description = <<-EOT
+    ARN of the GitHub Actions OIDC provider in this account, which the deploy
+    role's trust policy names as its federated principal.
+
+    Resolved by the caller with the `arn` form of the
+    `aws_iam_openid_connect_provider` data source, never the `url` form: at
+    provider 6.62.0 the `url` form calls `ListOpenIDConnectProviders` and scans
+    the result, and that action takes no resource constraint — so granting it
+    would mean an account-wide `Resource: "*"` on the plan role, which runs
+    untrusted pull-request code.
+
+    It arrives as an input rather than being resolved here because resolving it
+    is an API call, and the module's test suite reaches no AWS account: every
+    run block is `command = plan`, and plan reads data sources.
+  EOT
+  type        = string
+
+  # Pinned to the whole ARN rather than to a prefix, and this validation is
+  # load-bearing rather than defensive: iam.tf reads the account id out of the
+  # fifth field of this string, because `aws_caller_identity` cannot live in a
+  # module whose tests hold no credentials. The regex is what guarantees that
+  # field is a 12-digit account id.
+  #
+  # It also catches the `url` form — a caller who reached for the wrong data
+  # source gets a plan-time error naming this variable, rather than an
+  # `AccessDenied` on `ListOpenIDConnectProviders` that names neither.
+  validation {
+    condition     = can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:oidc-provider/token\\.actions\\.githubusercontent\\.com$", var.github_oidc_provider_arn))
+    error_message = "The github_oidc_provider_arn must be the full ARN of this account's GitHub Actions OIDC provider, for example \"arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com\". Resolve it with the `arn` form of the aws_iam_openid_connect_provider data source; it is not the issuer URL."
+  }
+}
+
+variable "app_github_owner" {
+  description = <<-EOT
+    GitHub user or organisation that owns the app repository — the repository
+    that deploys into this environment, not this one. Half of the OIDC subject
+    the deploy role trusts.
+
+    Deliberately a separate input from the environment root's `github_owner`,
+    which names the owner of *this* repository and feeds the Owner and Repo
+    tags. The two hold the same string today by coincidence rather than by
+    construction: nothing requires the two repositories to share an owner, and
+    wiring this from the tag value would mean transferring this repository to an
+    organisation silently rewrote a trust policy in another one. It is also the
+    half of an identity whose other half — app_github_owner_id — is already an
+    input here, and one identity taken from two sources is two values that can
+    disagree.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9](-?[A-Za-z0-9])*$", var.app_github_owner)) && length(var.app_github_owner) <= 39
+    error_message = "The app_github_owner must be a valid GitHub account name: alphanumerics separated by single hyphens, 39 characters or fewer."
+  }
+}
+
+variable "app_github_owner_id" {
+  description = "Numeric id of the GitHub account in app_github_owner. Embedded in the OIDC subject the deploy role trusts, in GitHub's immutable subject format, and not interchangeable with the account name."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.app_github_owner_id))
+    error_message = "The app_github_owner_id must be the numeric account id, digits only. Read it with: gh api repos/<owner>/react-cloudfront-app --jq .owner.id"
+  }
+}
+
+variable "app_github_repository_id" {
+  description = "Numeric id of the app repository. Embedded in the OIDC subject the deploy role trusts, alongside the repository name that iam.tf holds as a constant."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.app_github_repository_id))
+    error_message = "The app_github_repository_id must be the numeric repository id, digits only. Read it with: gh api repos/<owner>/react-cloudfront-app --jq .id"
+  }
+}
+
+variable "app_deploy_boundary_policy_name" {
+  description = <<-EOT
+    Name of the permissions boundary the deploy role must carry, published by
+    the bootstrap root as its `app_deploy_boundary_policy_name` output.
+
+    The name rather than the ARN, because a name is the same string in every
+    account and an ARN is not: this value reaches the module through a committed
+    `terraform.tfvars`, and a policy ARN embeds the account id. iam.tf composes
+    the ARN back from the partition, the account id and this name.
+
+    It is an input rather than a re-derivation of the bootstrap's
+    `<name_prefix>-app-deploy-boundary`, because the bootstrap publishes it as an
+    output precisely so that no other root has to know how it is built. A
+    mismatch here is not a plan error — it is an AccessDenied on CreateRole, from
+    a condition naming an ARN that appears nowhere in the diff.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9+=,.@_-]{1,128}$", var.app_deploy_boundary_policy_name))
+    error_message = "The app_deploy_boundary_policy_name must be a valid IAM policy name: letters, digits and the characters +=,.@_- , 128 characters or fewer. It is the policy's name, not its ARN and not a path."
+  }
+}

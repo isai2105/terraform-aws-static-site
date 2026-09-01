@@ -174,6 +174,31 @@ provider "aws" {
 variables {
   name_prefix = "tftest"
   environment = "test"
+
+  # The deploy role's five inputs, none of which has a default. They are here in
+  # the top-level block rather than in the run blocks that need them because a
+  # no-default variable left unset fails *every* run block with `No value for
+  # required variable` — including the six that have nothing to do with IAM.
+  #
+  # The values are fixtures and are chosen to be checkable. The account id in the
+  # provider ARN is what the composed permissions boundary ARN below is asserted
+  # against, because the module reads the account out of this string rather than
+  # from `aws_caller_identity`, which no module here can hold: this suite
+  # authenticates with literal fake keys and an STS call would fail before the
+  # first assertion.
+  github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+
+  app_github_owner         = "tftest-owner"
+  app_github_owner_id      = "1"
+  app_github_repository_id = "2"
+
+  # Deliberately not "tftest-app-deploy-boundary". The bootstrap happens to name
+  # this policy `<name_prefix>-app-deploy-boundary` today, and a fixture that
+  # matched that shape would let the module re-derive the name from
+  # `var.name_prefix` — the one thing the boundary input exists to stop — while
+  # this suite stayed green. A name with no relationship to the prefix is what
+  # makes the assertion below prove the input is read.
+  app_deploy_boundary_policy_name = "published-by-the-bootstrap"
 }
 
 # The configuration every environment in this repository actually uses: no
@@ -687,5 +712,62 @@ run "custom_domain_resolves_the_published_site_url" {
   assert {
     condition     = output.site_url == "https://app.example.com"
     error_message = "With a custom domain the site URL must resolve to https:// plus that domain, not to the distribution's own *.cloudfront.net hostname. This module owns that conditional precisely so that no consumer re-derives it: one that prefixed the hostname itself would be correct for every environment here today and would start serving the wrong host, without erroring, on the day a domain was set."
+  }
+}
+
+# What a plan can see of the deploy role: its name, its path, its permissions
+# boundary and the trust policy it carries. None of the four has a signal
+# anywhere else in this repository.
+#
+# Each of them fails at apply, in AWS, against conditions in `bootstrap/oidc.tf`
+# that this repository's own checks cannot see — a name outside the bootstrap's
+# ARN pattern, a `path` that moves the role out of it, a boundary ARN that does
+# not match character for character. `terraform validate`, `tflint` and `trivy`
+# are all silent on every one of them. These assertions are the only place a
+# wrong answer costs a red check instead of a half-applied environment.
+#
+# What is deliberately not asserted here is the inline policy's JSON. It names
+# `aws_s3_bucket.site.arn`, and the bucket name carries a `random_id` suffix that
+# is unknown until apply — so a condition reading that document is not a weak
+# assertion but `Error: Unknown condition value`, which would abort this run
+# block and skip anything after it. That the policy names resources from the
+# graph rather than strings is a property of how it is written, which is the
+# whole argument for declaring this role in the module; it needs no test because
+# written that way it cannot be wrong.
+#
+# Placed after the custom-domain blocks rather than among them because this one
+# takes the default configuration, and placed last for the reason the block above
+# gives about what a run block can take down with it.
+run "app_deploy_role" {
+  command = plan
+
+  assert {
+    condition     = aws_iam_role.app_deploy.name == "react-cloudfront-app-deploy-test"
+    error_message = "The deploy role must be named react-cloudfront-app-deploy-<environment>, deliberately breaking this module's name_prefix convention. Both apply roles are granted iam:CreateRole only on role/react-cloudfront-app-deploy-*, so a role named by the convention cannot be created by CI at all — and the trailing wildcard is real, so a wrong suffix is not caught by IAM either. It is caught here."
+  }
+
+  assert {
+    condition     = aws_iam_role.app_deploy.path == "/"
+    error_message = "The deploy role must be created at the root path. A role at /app/ has the ARN role/app/react-cloudfront-app-deploy-<env>, which does not match the bootstrap's role/react-cloudfront-app-deploy-* pattern — simulation returns implicitDeny — and the failure is an AccessDenied on CreateRole rather than anything a plan shows."
+  }
+
+  assert {
+    condition     = aws_iam_role.app_deploy.permissions_boundary == "arn:aws:iam::123456789012:policy/published-by-the-bootstrap"
+    error_message = "The deploy role must carry the bootstrap's permissions boundary, composed as arn:<partition>:iam::<account>:policy/<app_deploy_boundary_policy_name> with no path segment. Both apply roles grant iam:CreateRole only inside a StringEquals condition on iam:PermissionsBoundary equal to that exact ARN, so anything else — a missing boundary, a re-derived name, an inserted path — is an AccessDenied at apply quoting an ARN that appears nowhere in the plan."
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role.app_deploy.assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repo:tftest-owner@1/react-cloudfront-app@2:ref:refs/heads/main"
+    error_message = "The trust subject must be GitHub's immutable form, repo:<owner>@<owner_id>/react-cloudfront-app@<repo_id>:ref:refs/heads/main, composed from the three app_github_* inputs. The older repo:owner/name:... shape fails AssumeRoleWithWebIdentity on the app repository's very first deploy with an error that gives no hint why, and trusting the ref rather than an environment is what obliges that job to declare no GitHub Environment: the environment claim replaces the ref claim rather than joining it."
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role.app_deploy.assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
+    error_message = "The trust policy must condition on the audience as well as the subject. Without aud, the role trusts any token this issuer minted for this subject whoever it was minted for, which is the first of the two classic GitHub-OIDC trust policy mistakes."
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role.app_deploy.assume_role_policy).Statement[0].Principal.Federated == "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+    error_message = "The trust policy's federated principal must be the OIDC provider ARN the caller passed in. The module takes it as an input because resolving it is an API call, and this suite reaches no AWS account."
   }
 }

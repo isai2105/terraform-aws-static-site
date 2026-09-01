@@ -18,6 +18,17 @@ distribution's ARN, so it is unreachable except through the distribution.
 ## Using it
 
 ```hcl
+# The OIDC provider is resolved rather than written down: its ARN embeds the
+# account id, and a committed configuration should not carry one. The `arn` form
+# and never the `url` form — see the deploy role section below.
+data "aws_partition" "current" {}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_iam_openid_connect_provider" "github" {
+  arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
+}
+
 module "site" {
   source = "../../modules/static-site"
 
@@ -28,6 +39,19 @@ module "site" {
 
   name_prefix = "example"
   environment = "stage"
+
+  # The app repository's deploy identity — the OIDC provider to trust, the three
+  # values that compose the subject it trusts, and the name of the permissions
+  # boundary the role must carry. None of the five has a default; the section on
+  # the deploy role below says where each comes from and why the provider ARN is
+  # resolved rather than written down.
+  github_oidc_provider_arn = data.aws_iam_openid_connect_provider.github.arn
+
+  app_github_owner         = "example"
+  app_github_owner_id      = "1"
+  app_github_repository_id = "2"
+
+  app_deploy_boundary_policy_name = "example-app-deploy-boundary"
 
   # Every environment in this repository is ephemeral, so every one of them sets
   # this. It defaults to false, which is the right default everywhere else.
@@ -190,6 +214,51 @@ policy; and policies **intersect, never override** (CSP3 §8.1), so an
 application can only tighten this, never relax it. A `<meta http-equiv>` tag is
 not an escape hatch, and one silently ignores `frame-ancestors` anyway.
 
+## The app repository deploys with a role this module creates
+
+The other half of the cross-repository contract. Alongside the three SSM
+parameters, this module creates the IAM role the app repository assumes to
+deploy: `react-cloudfront-app-deploy-<environment>`, trusted through GitHub's
+OIDC provider for one subject —
+
+```
+repo:<app_github_owner>@<app_github_owner_id>/react-cloudfront-app@<app_github_repository_id>:ref:refs/heads/main
+```
+
+— and holding five permissions and nothing else: `s3:PutObject` and
+`s3:ListBucket` on **this environment's** bucket, `cloudfront:CreateInvalidation`
+and `cloudfront:GetInvalidation` on **this environment's** distribution, and
+`ssm:GetParameter` on the three parameters above. `GetInvalidation` is there
+because the deploy waits with `aws cloudfront wait invalidation-completed`, and
+that waiter polls it. There is no `s3:DeleteObject`, because the deploy never
+passes `--delete`, and no `kms:Decrypt`, because the parameters are `String`.
+
+**Why the role lives here rather than in the bootstrap.** Every ARN in that
+policy belongs to a resource in this module's own graph, and none of them is
+knowable anywhere else: the bucket name carries a `random_id` suffix that is
+re-minted on every apply, so a policy authored in a root that cannot see the
+bucket would name last cycle's ARN — and the failure would surface as an
+`AccessDenied` inside the *other* repository's pipeline, which is the worst
+place in the system to debug it. Written this way, there is nothing to keep in
+sync, which is also why the tests assert parameter names rather than ARNs.
+
+**What that costs, and it is a real cost.** The role is destroyed and recreated
+with the environment, like everything else here. Its ARN is therefore stable
+only because its **name** is — so the name is part of the contract with the app
+repository, and renaming it is a breaking change over there, not a refactor in
+here. The name is also fixed from the other side: `bootstrap/oidc.tf` grants CI
+`iam:CreateRole` only on `role/react-cloudfront-app-deploy-*`, which is why this
+one role deliberately breaks the `<name_prefix>-` convention every other name in
+this module follows, and why it is created at the root path.
+
+**Two clauses the consumer has to honour.** The trust names the **ref**, so the
+app repository's deploy job must declare **no** GitHub Environment: the
+`environment:` claim replaces the ref claim rather than joining it, and a job
+that names one gets a subject this trust does not match. And the boundary named
+by `app_deploy_boundary_policy_name` is mandatory — CI's `iam:CreateRole` is
+conditioned on it — so that value comes from the bootstrap's output of the same
+name rather than being re-derived here.
+
 ## SPA routing is decided at the edge, and it has one residual
 
 A CloudFront Function on **viewer-request** rewrites any URI whose **last path
@@ -311,7 +380,7 @@ in `PENDING_VALIDATION` is on the post-destroy checklist for the same reason.
 
 ## What a plan can establish, and what it cannot
 
-`make test` runs `tests/plan.tftest.hcl` with native `terraform test`: seven
+`make test` runs `tests/plan.tftest.hcl` with native `terraform test`: ten
 run blocks, every one of them `command = plan`, against the real AWS provider
 and no AWS account. The provider configurations in the test file hold credentials
 that cannot reach AWS and skip the STS call the provider otherwise makes when
@@ -341,6 +410,14 @@ What it holds:
   domain/certificate-source rule are refused at plan time
 - the certificate is requested through `aws.us_east_1` and the bucket is not,
   which is the one part of the custom-domain path a plan can genuinely catch
+- exactly three SSM parameters are published, at the composed names, as `String`
+  — asserted on names and never on ARNs, which are unknown until apply
+- the deploy role's name, its root path, its composed permissions boundary ARN
+  and its trust subject. Those four fail nowhere else: `validate`, `tflint` and
+  `trivy` are silent on all of them, and AWS refuses them only at apply, against
+  conditions in a root this one cannot see. Its inline policy's JSON is
+  deliberately **not** asserted — it names the bucket ARN, which is unknown at
+  plan, and an unknown condition value would skip the run blocks after it
 
 What it cannot: anything a live request answers. Whether the rewrite rule sorts
 real URIs the way it claims to, whether a missing asset really comes back as the
@@ -351,8 +428,11 @@ workflow is what makes the real request.
 
 ## What this module does not do yet
 
-- **The cross-repository contract.** The SSM parameters the app repository reads,
-  and the scoped OIDC deploy role it assumes, arrive with the contract phase.
+- **Nothing about the app repository's own pipeline.** Both halves of the
+  contract exist here now — the published parameters and the deploy role — but
+  what that repository does with them is documented rather than enforced from
+  this side, and an S3 lifecycle rule expiring the assets a `--delete`-free
+  deploy leaves behind is still a durability gap this module does not close.
 - **Routes with a dot in their last path segment.** They are served the origin's
   `403` rather than the application, for the reason the routing section above
   gives. It is a limitation of the rule, not an oversight, and closing it would
@@ -417,6 +497,8 @@ make docs-check  # what CI runs; fails instead of rewriting
 | [aws_cloudwatch_log_delivery_destination.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_delivery_destination) | resource |
 | [aws_cloudwatch_log_delivery_source.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_delivery_source) | resource |
 | [aws_cloudwatch_log_group.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
+| [aws_iam_role.app_deploy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
+| [aws_iam_role_policy.app_deploy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_route53_record.certificate_validation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route53_record) | resource |
 | [aws_s3_bucket.site](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) | resource |
 | [aws_s3_bucket_ownership_controls.site](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_ownership_controls) | resource |
@@ -428,13 +510,21 @@ make docs-check  # what CI runs; fails instead of rewriting
 | [random_id.bucket_suffix](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/id) | resource |
 | [aws_default_tags.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/default_tags) | data source |
 | [aws_default_tags.us_east_1](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/default_tags) | data source |
+| [aws_iam_policy_document.app_deploy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.app_deploy_assume_role](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.site](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_partition.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/partition) | data source |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
+| app\_deploy\_boundary\_policy\_name | Name of the permissions boundary the deploy role must carry, published by<br/>the bootstrap root as its `app_deploy_boundary_policy_name` output.<br/><br/>The name rather than the ARN, because a name is the same string in every<br/>account and an ARN is not: this value reaches the module through a committed<br/>`terraform.tfvars`, and a policy ARN embeds the account id. iam.tf composes<br/>the ARN back from the partition, the account id and this name.<br/><br/>It is an input rather than a re-derivation of the bootstrap's<br/>`<name_prefix>-app-deploy-boundary`, because the bootstrap publishes it as an<br/>output precisely so that no other root has to know how it is built. A<br/>mismatch here is not a plan error — it is an AccessDenied on CreateRole, from<br/>a condition naming an ARN that appears nowhere in the diff. | `string` | n/a | yes |
+| app\_github\_owner | GitHub user or organisation that owns the app repository — the repository<br/>that deploys into this environment, not this one. Half of the OIDC subject<br/>the deploy role trusts.<br/><br/>Deliberately a separate input from the environment root's `github_owner`,<br/>which names the owner of *this* repository and feeds the Owner and Repo<br/>tags. The two hold the same string today by coincidence rather than by<br/>construction: nothing requires the two repositories to share an owner, and<br/>wiring this from the tag value would mean transferring this repository to an<br/>organisation silently rewrote a trust policy in another one. It is also the<br/>half of an identity whose other half — app\_github\_owner\_id — is already an<br/>input here, and one identity taken from two sources is two values that can<br/>disagree. | `string` | n/a | yes |
+| app\_github\_owner\_id | Numeric id of the GitHub account in app\_github\_owner. Embedded in the OIDC subject the deploy role trusts, in GitHub's immutable subject format, and not interchangeable with the account name. | `string` | n/a | yes |
+| app\_github\_repository\_id | Numeric id of the app repository. Embedded in the OIDC subject the deploy role trusts, alongside the repository name that iam.tf holds as a constant. | `string` | n/a | yes |
 | environment | Name of the environment this instance of the module belongs to, for example "stage" or "prod". It appears in the bucket name, in the delivery and log group names, and in the SSM parameter path the app repository reads. | `string` | n/a | yes |
+| github\_oidc\_provider\_arn | ARN of the GitHub Actions OIDC provider in this account, which the deploy<br/>role's trust policy names as its federated principal.<br/><br/>Resolved by the caller with the `arn` form of the<br/>`aws_iam_openid_connect_provider` data source, never the `url` form: at<br/>provider 6.62.0 the `url` form calls `ListOpenIDConnectProviders` and scans<br/>the result, and that action takes no resource constraint — so granting it<br/>would mean an account-wide `Resource: "*"` on the plan role, which runs<br/>untrusted pull-request code.<br/><br/>It arrives as an input rather than being resolved here because resolving it<br/>is an API call, and the module's test suite reaches no AWS account: every<br/>run block is `command = plan`, and plan reads data sources. | `string` | n/a | yes |
 | name\_prefix | Prefix for the globally unique site bucket name, which is composed as<br/>`<name_prefix>-site-<environment>-<8 hex characters>`. This must be the same<br/>value the bootstrap root was applied with: the CI apply role's S3 grant is<br/>scoped to `<name_prefix>-site-*`, so a bucket named outside that pattern<br/>cannot be created by CI. | `string` | n/a | yes |
 | acm\_certificate\_arn | ARN of an existing, already-issued ACM certificate covering domain\_name, for<br/>the case where this module cannot validate one itself because the domain's<br/>DNS is not in Route 53 in this account.<br/><br/>It must live in us-east-1 whatever region the environment deploys to, because<br/>that is the only region CloudFront reads viewer certificates from. This<br/>module does not manage its lifecycle: it is not created, renewed, tagged or<br/>destroyed here, and it survives `terraform destroy`. | `string` | `null` | no |
 | domain\_name | Fully qualified domain name to serve the site from, for example<br/>"app.example.com". Leave null — the default — to serve from the<br/>distribution's own `*.cloudfront.net` hostname on the default CloudFront<br/>certificate, which requires no domain and works in any account.<br/><br/>When set, exactly one of hosted\_zone\_id or acm\_certificate\_arn must be set<br/>too: the first has this module request and validate a certificate through<br/>Route 53, the second attaches a certificate the caller has already issued.<br/><br/>One exact name, never a wildcard. `*.example.com` is rejected deliberately:<br/>a wildcard certificate covers the subdomains and not the apex, so making it<br/>useful means adding example.com as a subject alternative name — and this<br/>module has no SANs by design, which is what lets the validation record be<br/>resolved with one() rather than a for\_each over a set that is not known<br/>until the certificate exists (see certificate.tf). Accepting a wildcard here<br/>would advertise half a feature the rest of the file cannot complete. A<br/>caller who needs one issues the certificate themselves and attaches it<br/>through acm\_certificate\_arn, which is exactly what that mode is for. | `string` | `null` | no |
