@@ -1713,8 +1713,16 @@ data "aws_iam_policy_document" "apply_identity" {
 # union of their state grants as a deliberate choice. Re-syncing it from one
 # role here would silently leave it able to read every environment's state but
 # one, and that surfaces as an AccessDenied on a state key part-way through a
-# destroy. Nothing in this repository creates such an identity, which is why
-# this is a note and not a resource.
+# destroy.
+#
+# `apply_identity` and `apply_infrastructure` allow no such choice: they carry
+# no per-environment divergence to make one about, so a mirror of either is
+# current or it is wrong. Edit either document and re-sync every mirror of it in
+# the same change, not a follow-up one. A mirror that has fallen behind does not
+# fail at plan time — it fails part-way through a destroy, after the inline
+# policy is already gone, leaving the stripped role the teardown checklist
+# exists to prevent. Such an identity is created outside this repository and no
+# root here refreshes it, which is why this is a note and not a resource.
 resource "aws_iam_role_policy" "apply_state" {
   for_each = aws_iam_role.apply
 
