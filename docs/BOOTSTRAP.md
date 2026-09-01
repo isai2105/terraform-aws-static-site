@@ -63,6 +63,25 @@ Most people will run this as an account administrator, which is fine for a one-s
 step. The list is here for anyone who cannot. Add the matching `Delete*` actions if you intend
 to walk the bootstrap teardown in `docs/TEARDOWN.md`.
 
+**A shared-config profile carrying `mfa_serial` cannot drive the AWS provider, and a terminal
+does not change that.** The SDK underneath the provider never prompts for an MFA code and cannot
+read the session the AWS CLI caches for its own use, so `AWS_PROFILE` alone fails at provider
+configuration with `assume role with MFA enabled, but AssumeRoleTokenProvider session option not
+set`, before a single resource is read. That is raised against the `provider "aws"` block itself,
+so it is true of every root here and not only this one. Resolve the session with the CLI once,
+then hand Terraform the result:
+
+```bash
+aws sts get-caller-identity --profile <your-profile>   # prompts for MFA, caches the session
+eval "$(aws configure export-credentials --profile <your-profile> --format env)"
+```
+
+`export-credentials` needs AWS CLI 2.13 or newer — a higher floor than the table above, on this
+path only. What it exports is short-lived, an hour by default, so re-run the `eval` if a long
+`destroy` outlives it — `docs/TEARDOWN.md` section 2.3 carries the same constraint from the
+teardown side. Keep it as `eval "$(...)"` rather than pasting the printed keys, so they never
+reach shell history, and do not `set -x` in that shell.
+
 ## 2. Fill in `bootstrap/terraform.tfvars`
 
 Five of the values are yours to name — region, `name_prefix`, `project`, `github_owner`,
