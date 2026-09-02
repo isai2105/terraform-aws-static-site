@@ -256,6 +256,42 @@ resource "aws_iam_role" "app_deploy" {
 #     next deploy, naming a KMS key nobody had thought about.
 #   - **No `s3:GetObject`.** `aws s3 sync` compares the destination by listing
 #     it, not by reading it back.
+#
+# ---------------------------------------------------------------------------
+# This document is only half of what the role can do, and the other half is in a
+# repository — a root, rather — that this one cannot read
+# ---------------------------------------------------------------------------
+#
+# The role above carries a permissions boundary, so its effective permissions are
+# the *intersection* of the five actions below and
+# `data "aws_iam_policy_document" "app_deploy_boundary"` in bootstrap/oidc.tf.
+# Today all five fall inside it: `s3:PutObject` under that document's
+# `s3:*Object*`, `s3:ListBucket` explicitly, `cloudfront:CreateInvalidation`
+# explicitly, `cloudfront:GetInvalidation` under `cloudfront:Get*`, and
+# `ssm:GetParameter` under `ssm:Get*` on `parameter/static-site/*`; neither of
+# its two denies touches any of them.
+#
+# Nothing enforces that, here or there. `local.app_deploy_boundary_arn` is
+# *composed* from a policy name, for the reason stated where it is built — no
+# role in bootstrap/oidc.tf is granted `iam:GetPolicy` or `iam:ListPolicies`, so
+# a lookup would fail on the first pull-request plan. This module therefore knows
+# the boundary's ARN and has never seen its contents. A sixth action added below
+# that the boundary does not permit plans clean, applies clean, produces a role
+# whose inline policy names a permission it does not effectively hold, and fails
+# for the first time in the app repository's deploy job. Narrowing a verb family
+# in bootstrap/oidc.tf breaks these five the same way, from the other side, and
+# is even quieter: a policy body edit is a new version applied in place, with no
+# role in the diff at all.
+#
+# A static subset-checker was considered and rejected. IAM's wildcard semantics
+# — `*Object*` matching mid-token, `Get*` as a prefix, resource wildcards
+# spanning `/` — are fiddly enough that a half-correct implementation would pass
+# on exactly the day it mattered, and false confidence is worse than none. The
+# enforcement is the app repository's first deploy, which exercises all five
+# end-to-end with a real token. It has to be: the trust above names no AWS
+# principal, so this role cannot be assumed by hand and nothing in this
+# repository can rehearse it. Change either document and deploy stage.
+# docs/DEPLOY_CONTRACT.md section 7 states this as the interface it is.
 data "aws_iam_policy_document" "app_deploy" {
   statement {
     sid       = "UploadSiteObjects"
