@@ -70,6 +70,11 @@ The control plane, which is where most of the design actually lives:
                                with no long-lived AWS access key anywhere
 ```
 
+That lower half is **workload identity federation**: the CI roles trust no AWS principal at all,
+only `sts:AssumeRoleWithWebIdentity` from that provider, conditioned on `aud` and on exactly the
+subjects above. `bootstrap/` itself is a human at a terminal with an exported session, and
+deliberately not that.
+
 There is no VPC, no NAT gateway, no EC2 instance and no ALB in this repository. That stack lives
 in its own repository; see the tradeoffs section for why it is not a third environment here.
 
