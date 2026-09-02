@@ -1291,6 +1291,40 @@ data "aws_iam_policy_document" "apply_infrastructure" {
 # a later edit that widens them. Neither is redundant, and the deny is the one
 # to keep if only one survives. The patterns are the same ones the CI grants
 # use, so they hold as environments are added.
+#
+# ---------------------------------------------------------------------------
+# The other half of this ceiling is `data "aws_iam_policy_document" "app_deploy"`
+# in modules/static-site/iam.tf, and nothing enforces the pair
+# ---------------------------------------------------------------------------
+#
+# What the deploy role can actually do is the *intersection* of that document
+# and this one. Today the five actions it grants all fall inside these
+# statements: `s3:PutObject` under `s3:*Object*`, `s3:ListBucket` explicitly,
+# `cloudfront:CreateInvalidation` explicitly, `cloudfront:GetInvalidation` under
+# `cloudfront:Get*`, and `ssm:GetParameter` under `ssm:Get*` — and neither deny
+# below touches any of them.
+#
+# That holds by inspection and by nothing else. The module receives this policy
+# by *name* — `app_deploy_boundary_policy_name`, the output below — and composes
+# an ARN from it; it never reads this body, and it could not, since no role here
+# is granted `iam:GetPolicy` or `iam:ListPolicies`. The `check` further down
+# asserts the composed ARN and says nothing about what is in it.
+#
+# So narrowing a family here is a change with no signal anywhere. It plans
+# clean, it applies clean — a policy body edit is a new version applied in place,
+# with no role touched — and this repository's plan, tests, lint and review all
+# stay green. It surfaces as a runtime `AccessDenied` in the *app* repository's
+# deploy job, naming an action whose grant is plainly visible in the role's own
+# inline policy, from a ceiling that repository cannot see. Widening the module's
+# policy past this one fails the same way, from the other direction.
+#
+# No static check closes that: implementing IAM's wildcard semantics correctly
+# (`*Object*` matching mid-token, `Get*` as a prefix, resource wildcards spanning
+# `/`) is fiddly, and a half-correct subset-checker would pass on the day it
+# mattered. What actually exercises the intersection is the app repository's
+# first deploy, with a real token — no AWS principal is trusted by that role, so
+# nothing here can rehearse it. Change either document and deploy stage.
+# docs/DEPLOY_CONTRACT.md section 7 is where a consumer reads this.
 data "aws_iam_policy_document" "app_deploy_boundary" {
   # Verb families rather than named actions, because a ceiling enumerated action
   # by action is an action ceiling wearing a class ceiling's justification. The
