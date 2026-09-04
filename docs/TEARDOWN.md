@@ -355,6 +355,49 @@ A destroy exiting 0 is a claim, not evidence. Terraform reports on what was in i
 and the resources most worth worrying about are the ones that leave state without leaving AWS.
 Run these after the last environment is destroyed and before tearing down the bootstrap.
 
+**`make verify-teardown` is this checklist**, and running the target is how to run it. Eleven
+commands pasted by hand are eleven commands that drift away from the code they describe, and row
+5 below is what that drift looks like written down. The target is account-wide rather than
+per-environment on purpose: after a destroy the site bucket's `random_id` suffix is gone with the
+state, so the origin access control and the CloudFront Function can only be found by a prefix
+match on `<name_prefix>-site-`, which every environment shares — and the policy quotas are per
+account anyway. It reads `name_prefix`, `project` and `aws_region` out of
+`envs/*/terraform.tfvars`, and each environment's `Env` tag value out of the `environment` local
+in its `main.tf`, so the values it queries on are the ones the environments were applied with
+rather than something passed in on the command line.
+
+**Read the last line of its output, not its exit status.** The recipe distinguishes three
+outcomes — nothing found, something found, and a check that could not run at all, which is
+deliberately not the same answer as clean — but `make` does not propagate a recipe's exit code:
+any recipe failure is reported as its own `Error N` and make itself exits 2. So
+`make verify-teardown` returns 0 for clean and 2 for both of the others, and the distinction
+survives in a line printed on every path, refusals included:
+
+```
+verify-teardown-result: clean
+verify-teardown-result: leak
+verify-teardown-result: incomplete
+```
+
+`make verify-teardown | tail -1` is the whole of the machine-readable contract. `incomplete`
+covers a missing credential, a failed call, an input the target refuses to guess at, and one case
+worth knowing about: three of the five CloudFront list operations have no paginator in the AWS
+CLI, so a list the API truncates is reported as a page rather than counted as an answer. The
+CloudFront Function quota of 100 is exactly that page size, which is why the target says so
+rather than reporting clean.
+
+Two rows it answers differently from the way they are written below, and it says so as it runs.
+Row 9 is covered by row 10's tag inventory rather than by a name sweep, because after a destroy
+the bucket name is as unknowable as the origin access control's and enumerating buckets by prefix
+needs `s3:ListAllMyBuckets`, which the CI apply role deliberately does not hold; a site bucket is
+taggable, so a surviving one is exactly what row 10 finds — and tagged rather than merely
+taggable, because the precondition at `modules/static-site/logging.tf:106`, over the contract in
+`modules/static-site/tags.tf`, fails the plan for any provider configuration whose `default_tags`
+carry an empty `Project` or an `Env` other than that environment's own. Row 8 is reported without failing the
+target, because a certificate is named by a domain rather than by `name_prefix` and nothing in
+the account can say whose a pending one is. The Makefile comment above the target carries the
+rest of the reasoning, including the two things a pass does not prove.
+
 The "Found" column is what this checklist returned on 2026-08-27, run twice — after the two-pass
 teardown across a `force-unlock`, and after the clean prod destroy. **Identical both times.** One
 row carries no measurement and says so: the viewer-request function arrived after that day, so

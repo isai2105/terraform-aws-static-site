@@ -12,7 +12,7 @@
 # which expose `tags` or `tags_all` in the provider schema, because neither the
 # CloudFront API nor a Route 53 resource record set has anywhere to put them.
 # AWS states the CloudFront half outright: "You can't add tags to edge
-# functions". The precondition in this file
+# functions". The precondition in logging.tf, on the access-log group,
 # therefore guarantees that everything *taggable* is tagged, which is a narrower
 # claim than it looks and is the strongest one available. policies.tf carries
 # what that costs the teardown assertion and which detectors are left.
