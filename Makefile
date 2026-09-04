@@ -115,7 +115,9 @@ RUNNER_IMAGE := ubuntu-24.04
 	audit audit-online audit-policy \
 	plan-stage apply-stage destroy-stage \
 	plan-prod apply-prod destroy-prod \
+	verify-teardown \
 	check-terraform check-tflint check-trivy check-terraform-docs check-zizmor \
+	check-aws-cli \
 	print-tflint-version print-trivy-version print-terraform-docs-version \
 	print-zizmor-version
 
@@ -124,7 +126,7 @@ help: ## Show the available targets.
 	@echo
 	@grep -E '^[a-zA-Z][a-zA-Z_-]*:.*## ' $(MAKEFILE_LIST) \
 		| sort \
-		| awk 'BEGIN { FS = ":.*## " } { printf "  %-14s %s\n", $$1, $$2 }'
+		| awk 'BEGIN { FS = ":.*## " } { printf "  %-16s %s\n", $$1, $$2 }'
 	@echo
 	@echo "terraform pinned by .terraform-version: $(TERRAFORM_VERSION)"
 	@echo "tflint pinned by this Makefile:         $(TFLINT_VERSION)"
@@ -255,6 +257,58 @@ check-zizmor:
 		echo "        https://github.com/zizmorcore/zizmor/releases/tag/v$(ZIZMOR_VERSION)" >&2; \
 		exit 1; \
 	fi
+
+# And a fifth guard, for the AWS CLI, which `verify-teardown` at the bottom of
+# this file is built on. It is the only one here that does not pin an exact
+# version, and that deviation has to argue for itself rather than be noticed in
+# review.
+#
+# The four guards above compare an exact number because in each case the tool
+# *is* the specification. tflint, trivy and zizmor decide what counts as a
+# finding and terraform-docs decides what a README says, so a different build
+# gives a different answer about this repository, and a check run against an
+# unpinned one answers a question nobody asked. The AWS CLI decides nothing of
+# the sort: it carries a query to an API versioned by AWS rather than by the
+# binary, and the answer is a fact about an account at a moment. Pinning it
+# would fix the transport and not the answer, while making `verify-teardown`
+# refuse to run on every CI runner and every workstation whose awscli formula
+# has moved — a guard that fails for reasons unrelated to what it guards is a
+# guard people learn to bypass.
+#
+# The major version is a different matter and is asserted, because that is the
+# one boundary at which the answer really does change. v1 and v2 differ in
+# output defaults, in whether pagination is automatic, and in how `--query` is
+# applied to a paginated result — and every query in `verify-teardown` is
+# written against v2. A v1 binary satisfies `command -v aws` and then returns
+# something those queries misread, which is the specific shape this whole target
+# exists to avoid: a clean-looking answer to a question that was not asked.
+check-aws-cli:
+	@if ! command -v aws >/dev/null 2>&1; then \
+		echo "make: the AWS CLI was not found on PATH." >&2; \
+		echo "      verify-teardown asks AWS what is standing in the account, so" >&2; \
+		echo "      there is nothing it can do without one. Version 2 is required." >&2; \
+		echo "      install it with:  brew install awscli" >&2; \
+		echo "                   or:  https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" >&2; \
+		exit 1; \
+	fi; \
+	out="$$(aws --version 2>&1)"; \
+	actual="$${out#aws-cli/}"; \
+	actual="$${actual%% *}"; \
+	case "$$actual" in \
+	2.*) ;; \
+	*) \
+		echo "make: the AWS CLI on PATH is not version 2." >&2; \
+		echo "      expected 2.x  (the queries in verify-teardown are written against v2)" >&2; \
+		echo "      found    $$actual  ($$(command -v aws))" >&2; \
+		echo "      Unlike the four guards above this one does not pin a patch level," >&2; \
+		echo "      because the CLI transports a query rather than deciding its answer." >&2; \
+		echo "      The major version is asserted because v1 differs in output defaults," >&2; \
+		echo "      pagination and --query handling, and would return a clean-looking" >&2; \
+		echo "      answer to a query it read differently." >&2; \
+		echo "      upgrade with:  brew install awscli" >&2; \
+		exit 1; \
+		;; \
+	esac
 
 # Also internal: the one place validate.yml can ask which tflint this
 # repository pins, so the workflow and the guard cannot disagree.
@@ -982,3 +1036,538 @@ apply-prod: check-terraform ## Apply the prod environment. Prompts before changi
 
 destroy-prod: check-terraform ## Destroy the prod environment. Prompts before removing anything.
 	$(call terraform_env,destroy,prod)
+
+# ---------------------------------------------------------------------------
+# The post-destroy sweep
+# ---------------------------------------------------------------------------
+
+# docs/TEARDOWN.md section 6 as a target, because a checklist a human pastes is
+# a checklist that drifts from the code it describes. It had already drifted
+# when this was written: row 5, the CloudFront Function, reads "not measured —
+# this resource postdates the walk-through", and the three commands in section
+# 6.1 appear in no Makefile target and no workflow. Prose drifts in silence; a
+# target drifts in a diff, where somebody has to approve it.
+#
+# What it is for. A destroy exiting 0 is a claim about a state file, and the
+# resources most worth worrying about are the ones that leave state without
+# leaving AWS. Four of the types this module creates —
+# `aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy`,
+# `aws_cloudfront_origin_access_control` and `aws_cloudfront_function` — expose
+# no tags at all; the CloudFront API has nowhere to put them, and for the
+# function AWS says so outright: "You can't add tags to edge functions". So the
+# tag-based assertion e2e.yml makes at the end of a lifecycle run is
+# structurally blind to a leak in any of them, and section 6.2 measures how
+# blind: tags cover 6 of the module's 18 resources. What finds the rest is a
+# sweep by name, which is this.
+#
+# ONE ACCOUNT-WIDE TARGET, NOT `verify-teardown-stage` AND `-prod`. That breaks
+# the per-environment convention every other AWS-facing target in this file
+# follows, so it is argued here rather than left to be noticed.
+#
+# The decisive reason is that a per-environment sweep has nothing to filter on.
+# The origin access control and the CloudFront Function are both named
+# `<name_prefix>-site-<env>-<8 hex>`, carrying the site bucket's `random_id`
+# suffix, and after a destroy the state that knew that suffix is gone. The
+# suffix is therefore unknowable, and the only expression that can find either
+# resource is a prefix match on `<name_prefix>-site-`. That prefix is shared by
+# every environment, so the sweep is account-wide whether or not its name admits
+# it — and a `-stage` variant would either sweep the whole account under a name
+# claiming otherwise, or narrow to `<name_prefix>-site-stage-` and look straight
+# past a leak left by a root applied with the wrong environment constant.
+#
+# The second reason is that the account is the more useful question. The custom
+# cache policy and response headers policy quotas are 20 per *account*, not per
+# distribution, and this module burns 2 of each per environment. "Is this
+# account clean" is what predicts the next apply failing on a quota error that
+# names nothing about the leak that caused it. "Is stage clean" does not.
+#
+# WHERE `name_prefix` COMES FROM, which is the one input that can make this
+# target lie. README.md names the failure directly: a wrong `project` or prefix
+# makes a query match nothing, therefore report clean, over a live leak. So it
+# is deliberately not an environment variable and not a `?=` override — an
+# exported `NAME_PREFIX` left behind by another repository in the same shell is
+# silently wrong in exactly that direction, and an override is at its worst on
+# the day somebody is debugging and least likely to reread it.
+#
+# It is read out of `envs/*/terraform.tfvars` instead: the values the
+# environments are actually applied with, tracked on purpose (`.gitignore`
+# carries an explicit `!envs/*/terraform.tfvars` so a blanket rule cannot drop
+# them), and present in a CI checkout with nothing passed in. `project` and
+# `aws_region` come from the same files. The `Env` tag value comes from each
+# environment root's `environment` local in main.tf rather than from its
+# directory name, because the tag is what the query matches on and a prod root
+# copied from stage keeping `environment = "stage"` is the mistake that file's
+# own comment warns about — reading the directory name would paper over it.
+#
+# Those three values are per-account rather than per-environment, by the rule
+# envs/*/variables.tf states and envs/prod/terraform.tfvars repeats, so the
+# environments have to agree about them. This reads all of them and refuses if
+# they disagree rather than picking one: two prefixes in the tree means half the
+# account is not being swept, and a sweep that silently covers half an account
+# is the thing this target exists to replace.
+#
+# WHAT IT CHECKS, against the eleven rows of section 6.
+#
+#   1  Distributions, matched on the module's naming and never counted to zero.
+#      Section 6.3: `list-distributions` returns the whole account, and on the
+#      account this was measured in it returned one distribution belonging to an
+#      unrelated project. The match is on the `Comment` the module composes and
+#      on the origin's domain name, either of which carries the bucket name.
+#   2  Custom cache policies, and 3 custom response headers policies. `--type
+#      custom` is not optional: without it AWS's managed policies come back as
+#      well and the count is never zero. Two numbers are reported rather than
+#      one — the policies matching this module's prefix, which are a leak and
+#      fail this target, and the account's total against the quota of 20, which
+#      is information and does not. In a shared account somebody else's custom
+#      policy is not this repository's leak, but it does consume the quota that
+#      makes the next apply fail, and that is worth printing rather than hiding.
+#   4  Origin access controls and 5 CloudFront Functions, by prefix, for the
+#      random-suffix reason above. No `--stage` filter on the functions, per
+#      section 6.1: a leaked function exists in both stages, and a filter is one
+#      more way for a sweep to look past the thing it is for.
+#   6  Access log groups under /aws/vendedlogs/cloudfront/<name_prefix>-site-*,
+#      in us-east-1 and not in the environment's region, because CloudFront's
+#      logging control plane answers in us-east-1 whatever region the
+#      environment uses.
+#   7  Delivery sources, destinations and deliveries, in us-east-1 for the same
+#      reason.
+#   8  ACM certificates left PENDING_VALIDATION in us-east-1 — reported, and
+#      deliberately not failing this target. Nothing here can attribute one: a
+#      certificate is named by a domain the caller brings rather than by
+#      `name_prefix`, so an unrelated pending certificate in the account is not
+#      this repository's leak, and one this module did create is tagged, which
+#      means row 10 below already fails on it. The other half of that row cannot
+#      be checked at all: the DNS validation record lives in a hosted zone this
+#      repository does not create and has no grant to read, so a stranded record
+#      is outside every query here and stays a manual step. Section 7 — no
+#      environment in this repository supplies a `domain_name`, so nothing on
+#      this path has ever run.
+#   9  Site buckets. Answered through the tag inventory below rather than by a
+#      name sweep, and this is the one row served differently from the way
+#      section 6 wrote it. After a destroy the bucket's random suffix is
+#      unknowable exactly as the origin access control's is, and enumerating
+#      buckets by prefix needs `s3:ListAllMyBuckets` — an account-wide action
+#      the CI apply role deliberately does not hold, its S3 grant being `s3:*`
+#      scoped to `<name_prefix>-site-*` and nothing broader. A site bucket is
+#      taggable, and section 6.2 measured it as the single resource the
+#      environment-region tag query returns, so a surviving one is precisely
+#      what that query finds and names.
+#
+#      That substitution rests on the bucket being *tagged*, not merely
+#      taggable, and on it carrying the value this target queries for — so the
+#      thing that guarantees both is worth citing rather than trusting.
+#      modules/static-site/tags.tf states the contract: every taggable resource
+#      is tagged through the caller's provider `default_tags`, deliberately as
+#      the only mechanism. tags.tf:47-51 reads `aws_default_tags` from both
+#      provider configurations, the default one and the aliased `aws.us_east_1`
+#      which inherits nothing from it, and tags.tf:76-77 rejects either that
+#      carries an empty `Project` or an `Env` unequal to this module instance's
+#      own environment. modules/static-site/logging.tf:106 is the precondition
+#      that turns that into a failed plan. A site bucket that exists and is
+#      invisible to the tag inventory therefore cannot reach apply.
+#
+#      The `Env` half is the load-bearing one here, and tags.tf:64-69 names why
+#      in the same terms this row needs: the prod root comes into existence by
+#      being copied from stage, so `Env = "stage"` on prod's resources is the
+#      likely mistake rather than a missing key — and the consequence it states
+#      is exactly this substitution's failure mode, "prod's teardown query
+#      looks for `Env=prod` and finds nothing".
+#
+#      One thing that guard does not cover, stated because a citation is only
+#      worth having if it is exact. tags.tf:61-63 checks that a `Project`
+#      choice was made, not what it was, the value being the caller's to pick.
+#      So `project` edited in `envs/*/terraform.tfvars` between an apply and a
+#      later sweep leaves the bucket carrying the old value while this target
+#      queries the new one, and row 10 reports clean over a bucket that is
+#      standing. `Env` is not in that category: it fails the plan. That
+#      remaining gap is the same one the name_prefix argument above is written
+#      against, and the reason `project` is read from those files rather than
+#      from an overridable variable — the value queried with is at least the
+#      one the tree declares, and it moves only in a diff somebody approves.
+#  10  The tag inventory, for `Project` and `Env`, in BOTH the environment's own
+#      region and us-east-1. Section 6.2 measured why: the environment's region
+#      returns 1 resource while 5 live us-east-1 resources sit outside it, so a
+#      single-region query reports success over surviving resources.
+#  11  A stranded `.tflock` beside the state, section 5.2. The state bucket
+#      carries a per-account random suffix, so its name is not in the tree: it
+#      comes from `TF_STATE_BUCKET` when that is set, which is the variable
+#      apply.yml and e2e.yml already pass to `-backend-config`, and otherwise
+#      from `envs/*/backend.hcl`. Finding neither is reported as a check that
+#      could not run, never as one that passed.
+#
+# One resource is on none of those rows on purpose:
+# `<name_prefix>-app-deploy-boundary`, the managed policy the app deploy role
+# carries as its permissions boundary. It outlives every environment by design
+# and comes down with the bootstrap in section 8, so finding it standing while
+# this runs is the expected result rather than a leak.
+#
+# WHAT A PASS PROVES, AND WHAT IT DOES NOT. It proves that nothing matching this
+# module's naming is standing in this account at the moment it ran. That is the
+# whole of it, and the closing message says that rather than "clean", because
+# two gaps are structural rather than something this target can close:
+#
+#   - It only finds what it was told to look for. Every check is a query written
+#     by hand against a resource type the module creates today. A type added to
+#     the module tomorrow is covered by nothing here until a check is added
+#     beside the others, and it will not go missing loudly — it will simply
+#     never be mentioned, and this target will report a pass having asserted
+#     nothing about it. That is the failure `validate` and `test` above each
+#     grew a second pass to prevent, and no equivalent second pass is available
+#     here: nothing outside Terraform can enumerate the resource types this
+#     module creates.
+#   - Every check is scoped to the `name_prefix` this tree declares today. A
+#     leak from a cycle run under some other prefix — an earlier value, a
+#     colleague's clone of this repository — is invisible to all of it.
+#
+# THREE OUTCOMES, AND HOW A CALLER TELLS THEM APART — which is not by the exit
+# code, and that is the whole of this paragraph. "Found something" and "could not
+# look" are different answers, and collapsing them is how a sweep starts
+# reporting success over a network error, so the recipe distinguishes them:
+#
+#   0  every check ran, and none of them found anything.
+#   1  at least one check found a resource matching this module's naming.
+#   2  at least one check could not run — no credentials, an AWS call that
+#      failed, a list the API truncated, an input this target refuses to guess
+#      at. Nothing was disproved there; it was not asked.
+#
+# 1 wins when both happen, a leak being the more actionable of the two.
+#
+# GNU Make then throws two of those three away, which is the kind of thing that
+# is cheap to write down here and expensive to discover in a workflow. Make does
+# not propagate a recipe's status: a recipe that fails at all is reported as its
+# own `Error N` and make itself exits 2 — measured on the 3.81 that ships with
+# macOS and documented identically for 4.x, which is what every job in
+# .github/workflows/ runs. So `make verify-teardown` exits 0 for clean and 2 for
+# *both* of the others, and a caller reading `$?` cannot tell a leak from an
+# expired session. That is exactly the distinction the two codes
+# exist for, so the recipe also prints it, as the last line of stdout, on every
+# path — including the refusals that happen before the first AWS call:
+#
+#   verify-teardown-result: clean
+#   verify-teardown-result: leak
+#   verify-teardown-result: incomplete
+#
+# That line is the contract for anything reading this target's output. A caller
+# branches on it — `make verify-teardown | tail -1` — rather than on the exit
+# status, and the workflow step that eventually wires this into e2e.yml is meant
+# to do the same. The numeric codes remain for anyone running the recipe's shell
+# directly, and are what the `set -e` semantics inside it are written against.
+#
+# CI-READY WITH NO NEW GRANT, which is a property to preserve rather than a
+# plan. Wiring this into e2e.yml and apply.yml is a separate change; what
+# matters here is that it can be. Every call below is already allowed to the CI
+# apply role by bootstrap/oidc.tf — the five CloudFront list actions
+# (ListDistributions, ListCachePolicies, ListResponseHeadersPolicies,
+# ListOriginAccessControls, ListFunctions), logs:DescribeLogGroups,
+# logs:DescribeDeliverySources, logs:DescribeDeliveryDestinations,
+# logs:DescribeDeliveries, acm:ListCertificates, tag:GetResources, and
+# s3:ListBucket on the state bucket. The preflight is `sts:GetCallerIdentity`,
+# which no policy has to grant: AWS documents it as requiring no permissions,
+# and it is what turns an expired session into one sentence rather than a
+# traceback per check. A check added here that needs an action outside that set
+# is a change to bootstrap/oidc.tf, and should arrive as one rather than be
+# discovered as an AccessDenied in a workflow.
+#
+# TRUNCATION, which is the last way this sweep could have reported clean over a
+# leak, and the reason three of the queries below look stranger than the rest.
+#
+# The CLI paginates for you only where botocore ships a paginator for the
+# operation. Checked against the paginator definitions in awscli 2.36.29 rather
+# than assumed: `ListDistributions` and `ListOriginAccessControls` have one, and
+# so do every logs, ACM, tagging and S3 call here — but `ListCachePolicies`,
+# `ListResponseHeadersPolicies` and `ListFunctions` do not. For those three the
+# CLI makes exactly one call, takes the API's default `MaxItems` of 100, and
+# neither follows nor mentions the `NextMarker` that comes back. A truncated
+# list would be read as the whole list.
+#
+# For the two policy types the 20-per-account quota puts 100 out of reach. For
+# functions it does not: that quota is 100, so an account at its function limit
+# is exactly the account whose leaked function falls off the end of the page —
+# and the CloudFront Function is already the resource with no other detector,
+# being untaggable and colliding with nothing on the next apply.
+#
+# So those three queries ask for the marker as well as the names, in the same
+# call rather than a second one, by prepending a `!TRUNCATED!` element when
+# `NextMarker` is set: `[X.NextMarker && '!TRUNCATED!', X.Items[…]] | []`. The
+# `&&` yields the one-element list only when the marker is truthy, and the
+# trailing flatten merges it into the names. The recipe treats that sentinel as
+# could-not-look rather than as clean, which is the honest answer — it is not
+# pagination, it is a refusal to call a page an answer. The sentinel cannot
+# collide with a finding: CloudFront restricts these names to letters, digits,
+# underscores and hyphens, and `!` is none of those.
+#
+# Five details of the recipe worth knowing before editing it. Every query asks
+# for `--output text` and is judged by whether it printed anything rather than
+# by a count, so a finding names the resource: a count tells you to go and look,
+# a name tells you what to look at. The distribution check has no name to print
+# — a distribution has an opaque `E…` id — so it prints the id joined to its
+# origin's domain name, which carries the site bucket, and both halves are
+# wrapped in `not_null` because a distribution with no origin or no comment
+# would otherwise fail the whole query with a JMESPath type error rather than
+# not matching.
+#
+# The CLI prints the literal `None` for a JMESPath expression that resolved to
+# null, which is what an empty CloudFront list does — the API omits `Items`
+# entirely rather than returning `[]` — so that string is stripped, and
+# stripping it is this target's equivalent of the ``|| `[]` `` guard the
+# commands in section 6.1 carry. Nothing this sweep can match is named `None`,
+# because every filter requires the `<name_prefix>-site-` prefix.
+#
+# Each call's stderr goes to a file rather than to stdout, so that nothing the
+# CLI writes there can be read back as a resource name. That file is printed
+# only when the call failed, and is overwritten by the next call otherwise: a
+# warning from a call that succeeded is discarded, not reported. Discarding it
+# is the intended trade — the alternative is a sweep that treats CLI chatter as
+# a finding — but it is a discard rather than a report, and the difference is
+# worth knowing before trusting silence here.
+#
+# One call deliberately does not do that. The `sts:GetCallerIdentity` preflight
+# leaves its stderr attached to the terminal, because a profile configured with
+# an MFA serial prompts for a token code there and reads the answer from the
+# tty: with stderr captured, that prompt is invisible and the target looks hung
+# on the one account this repository is developed against. By the time the
+# checks run the session exists and is cached, so a prompt cannot appear in the
+# middle of them.
+#
+# And the two policy checks are the only ones that filter in the shell rather
+# than in JMESPath, because one call has to answer two questions — which
+# policies are this module's, and how many exist in total — and asking twice
+# would let the two answers describe different moments. That filter is anchored,
+# `^` and not a substring, to match the `starts_with()` every other check uses;
+# the prefix is safe to use as an expression because
+# modules/static-site/variables.tf already constrains `name_prefix` to
+# lower-case letters, digits and hyphens, none of which mean anything to a basic
+# regular expression.
+verify-teardown: check-aws-cli ## Sweep the account for anything this module named that survived a destroy.
+	@finish() { printf 'verify-teardown-result: %s\n' "$$1"; exit "$$2"; }; \
+	tfvars_list="$$(find envs -mindepth 2 -maxdepth 2 -type f -name terraform.tfvars | sort || true)"; \
+	if [ -z "$$tfvars_list" ]; then \
+		echo "make: verify-teardown found no envs/*/terraform.tfvars to read." >&2; \
+		echo "      Every query it makes is scoped by name_prefix, and a query built" >&2; \
+		echo "      from an empty prefix matches nothing — which this target would" >&2; \
+		echo "      then report as a clean account. Refusing instead." >&2; \
+		finish incomplete 2; \
+	fi; \
+	tfvars=(); \
+	while IFS= read -r file; do tfvars+=("$$file"); done <<< "$$tfvars_list"; \
+	lines() { printf '%s\n' "$$1" | grep -c . || true; }; \
+	TFVAR=""; \
+	read_tfvar() { \
+		local name="$$1" values count; \
+		values="$$(sed -n "s/^[[:space:]]*$${name}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$${tfvars[@]}" | sort -u || true)"; \
+		count="$$(lines "$$values")"; \
+		if [ "$$count" -eq 0 ]; then \
+			echo "make: no environment declares $${name}, so verify-teardown has nothing" >&2; \
+			echo "      to match on and every query below would match everything or" >&2; \
+			echo "      nothing. Looked in:" >&2; \
+			printf '        %s\n' "$${tfvars[@]}" >&2; \
+			finish incomplete 2; \
+		fi; \
+		if [ "$$count" -gt 1 ]; then \
+			echo "make: the environments disagree about $${name}:" >&2; \
+			printf '%s\n' "$$values" | sed 's/^/        /' >&2; \
+			echo "      This value is per-account rather than per-environment — see the" >&2; \
+			echo "      comment at the top of envs/prod/terraform.tfvars. Refusing rather" >&2; \
+			echo "      than picking one and sweeping for part of the account." >&2; \
+			finish incomplete 2; \
+		fi; \
+		TFVAR="$$values"; \
+	}; \
+	read_tfvar name_prefix; name_prefix="$$TFVAR"; \
+	read_tfvar project; project="$$TFVAR"; \
+	read_tfvar aws_region; env_region="$$TFVAR"; \
+	site="$${name_prefix}-site-"; \
+	environments=(); \
+	while IFS= read -r file; do \
+		dir="$$(dirname "$$file")"; \
+		value="$$(sed -n 's/^[[:space:]]*environment[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$$dir/main.tf" | sort -u || true)"; \
+		if [ "$$(lines "$$value")" -ne 1 ]; then \
+			echo "make: could not read one environment name out of $$dir/main.tf." >&2; \
+			echo "      sed's own message, if any, is immediately above this one." >&2; \
+			echo "      The Env tag the inventory query filters on comes from the" >&2; \
+			echo "      \`environment\` local there, not from the directory name, so a" >&2; \
+			echo "      guess here would query a tag nothing carries and report clean." >&2; \
+			finish incomplete 2; \
+		fi; \
+		environments+=("$$value"); \
+	done <<< "$$tfvars_list"; \
+	state_bucket="$${TF_STATE_BUCKET:-}"; \
+	if [ -z "$$state_bucket" ]; then \
+		backend_list="$$(find envs -mindepth 2 -maxdepth 2 -type f -name backend.hcl | sort || true)"; \
+		if [ -n "$$backend_list" ]; then \
+			backends=(); \
+			while IFS= read -r file; do backends+=("$$file"); done <<< "$$backend_list"; \
+			state_bucket="$$(sed -n 's/^[[:space:]]*bucket[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$${backends[@]}" | sort -u || true)"; \
+		fi; \
+	fi; \
+	state_region="$${TF_STATE_REGION:-$$env_region}"; \
+	dirty=0; \
+	incomplete=0; \
+	if ! errfile="$$(mktemp)"; then \
+		echo "make: verify-teardown could not create a temporary file for stderr." >&2; \
+		finish incomplete 2; \
+	fi; \
+	trap 'rm -f "$$errfile"' EXIT; \
+	QUERY_RESULT=""; \
+	QUERY_TRUNCATED=0; \
+	aws_query() { \
+		local label="$$1" raw; \
+		shift; \
+		QUERY_TRUNCATED=0; \
+		if ! raw="$$("$$@" 2>"$$errfile")"; then \
+			{ printf '??    %s\n' "$$label"; \
+			  printf '      the AWS call failed, so this check proved nothing:\n'; \
+			  sed 's/^/        /' "$$errfile"; } >&2; \
+			incomplete=1; \
+			return 1; \
+		fi; \
+		QUERY_RESULT="$$(printf '%s' "$$raw" | tr -s '[:space:]' '\n' | sed -e '/^None$$/d' -e '/^$$/d')"; \
+		if printf '%s\n' "$$QUERY_RESULT" | grep -qxF '!TRUNCATED!'; then \
+			QUERY_TRUNCATED=1; \
+			incomplete=1; \
+			QUERY_RESULT="$$(printf '%s\n' "$$QUERY_RESULT" | grep -vxF '!TRUNCATED!' || true)"; \
+		fi; \
+		return 0; \
+	}; \
+	report() { \
+		if [ -n "$$QUERY_RESULT" ]; then \
+			printf 'LEAK  %s:\n' "$$1"; \
+			printf '%s\n' "$$QUERY_RESULT" | sed 's/^/        /'; \
+			dirty=1; \
+		elif [ "$$QUERY_TRUNCATED" -eq 0 ]; then \
+			printf 'ok    %s: nothing\n' "$$1"; \
+		fi; \
+		if [ "$$QUERY_TRUNCATED" -ne 0 ]; then \
+			{ printf '??    %s: the API truncated this list, so what came back is a\n' "$$1"; \
+			  printf '      page and not the answer. This operation has no paginator in\n'; \
+			  printf '      the CLI, so nothing follows the NextMarker it returned.\n'; \
+			  printf '      Counting it as could-not-look rather than as clean.\n'; } >&2; \
+		fi; \
+	}; \
+	sweep() { \
+		local label="$$1"; \
+		shift; \
+		aws_query "$$label" "$$@" || return 0; \
+		report "$$label"; \
+	}; \
+	policy_sweep() { \
+		local label="$$1" subcommand="$$2" query="$$3" all total; \
+		aws_query "$$label" aws cloudfront "$$subcommand" --region us-east-1 --type custom --output text --query "$$query" || return 0; \
+		all="$$QUERY_RESULT"; \
+		total="$$(lines "$$all")"; \
+		QUERY_RESULT="$$(printf '%s\n' "$$all" | grep -e "^$$site" || true)"; \
+		report "$$label"; \
+		if [ "$$QUERY_TRUNCATED" -ne 0 ]; then \
+			printf '      at least %s of the 20-per-account quota in use — the list was cut short\n' "$$total"; \
+		else \
+			printf '      %s of the 20-per-account quota in use, by everything in the account\n' "$$total"; \
+		fi; \
+	}; \
+	if ! caller="$$(aws sts get-caller-identity --region us-east-1 --query '[Account,Arn]' --output text)"; then \
+		echo "" >&2; \
+		echo "make: verify-teardown has no usable AWS credentials." >&2; \
+		echo "      The CLI's own message is immediately above this one." >&2; \
+		echo "" >&2; \
+		echo "      It asks AWS what is standing in the account, so there is no" >&2; \
+		echo "      degraded answer it can give here. Authenticate and re-run — a" >&2; \
+		echo "      profile is enough for the CLI, unlike the terraform targets above:" >&2; \
+		echo "" >&2; \
+		echo '        export AWS_PROFILE=<profile>   # or aws sso login --profile <profile>' >&2; \
+		finish incomplete 2; \
+	fi; \
+	printf 'account:     %s\n' "$$(printf '%s' "$$caller" | cut -f1)"; \
+	printf 'caller:      %s\n' "$$(printf '%s' "$$caller" | cut -f2)"; \
+	printf 'name_prefix: %s   (read from envs/*/terraform.tfvars)\n' "$$name_prefix"; \
+	printf 'matching:    %s*\n' "$$site"; \
+	printf 'regions:     %s and us-east-1\n' "$$env_region"; \
+	printf '\n'; \
+	sweep "CloudFront distributions matching $${site}* (id|origin)" \
+		aws cloudfront list-distributions --region us-east-1 --output text \
+		--query "DistributionList.Items[?contains(not_null(Comment, ''), '$${site}') || contains(not_null(Origins.Items[0].DomainName, ''), '$${site}')].join('|', [Id, not_null(Origins.Items[0].DomainName, 'no-origin')])"; \
+	policy_sweep "custom cache policies" list-cache-policies \
+		"[CachePolicyList.NextMarker && '!TRUNCATED!', CachePolicyList.Items[].CachePolicy.CachePolicyConfig.Name] | []"; \
+	policy_sweep "custom response headers policies" list-response-headers-policies \
+		"[ResponseHeadersPolicyList.NextMarker && '!TRUNCATED!', ResponseHeadersPolicyList.Items[].ResponseHeadersPolicy.ResponseHeadersPolicyConfig.Name] | []"; \
+	sweep "origin access controls" \
+		aws cloudfront list-origin-access-controls --region us-east-1 --output text \
+		--query "OriginAccessControlList.Items[?starts_with(Name, '$${site}')].Name"; \
+	sweep "CloudFront Functions" \
+		aws cloudfront list-functions --region us-east-1 --output text \
+		--query "[FunctionList.NextMarker && '!TRUNCATED!', FunctionList.Items[?starts_with(Name, '$${site}')].Name] | []"; \
+	sweep "access log groups (us-east-1)" \
+		aws logs describe-log-groups --region us-east-1 --output text \
+		--log-group-name-prefix "/aws/vendedlogs/cloudfront/$${site}" \
+		--query 'logGroups[].logGroupName'; \
+	sweep "delivery sources (us-east-1)" \
+		aws logs describe-delivery-sources --region us-east-1 --output text \
+		--query "deliverySources[?starts_with(name, '$${site}')].name"; \
+	sweep "delivery destinations (us-east-1)" \
+		aws logs describe-delivery-destinations --region us-east-1 --output text \
+		--query "deliveryDestinations[?starts_with(name, '$${site}')].name"; \
+	sweep "deliveries (us-east-1)" \
+		aws logs describe-deliveries --region us-east-1 --output text \
+		--query "deliveries[?starts_with(deliverySourceName, '$${site}')].id"; \
+	if aws_query "ACM certificates awaiting validation (us-east-1)" \
+		aws acm list-certificates --region us-east-1 --output text \
+		--certificate-statuses PENDING_VALIDATION \
+		--query 'CertificateSummaryList[].DomainName'; then \
+		if [ -z "$$QUERY_RESULT" ]; then \
+			printf 'ok    ACM certificates awaiting validation (us-east-1): nothing\n'; \
+		else \
+			printf 'note  ACM certificates awaiting validation (us-east-1):\n'; \
+			printf '%s\n' "$$QUERY_RESULT" | sed 's/^/        /'; \
+			printf '      Reported, not counted as a leak: a certificate is named by a\n'; \
+			printf '      domain rather than by name_prefix, so nothing here can say\n'; \
+			printf '      whose it is. One this module created carries tags and would\n'; \
+			printf '      fail the inventory below. Its validation record lives in a\n'; \
+			printf '      hosted zone this repository neither creates nor can read.\n'; \
+		fi; \
+	fi; \
+	regions=("$$env_region"); \
+	[ "$$env_region" = "us-east-1" ] || regions+=("us-east-1"); \
+	for environment in "$${environments[@]}"; do \
+		for region in "$${regions[@]}"; do \
+			sweep "tagged Project=$${project} Env=$${environment} in $${region}" \
+				aws resourcegroupstaggingapi get-resources --region "$$region" --output text \
+				--tag-filters "Key=Project,Values=$${project}" "Key=Env,Values=$${environment}" \
+				--query 'ResourceTagMappingList[].ResourceARN'; \
+		done; \
+	done; \
+	if [ "$$(lines "$$state_bucket")" -ne 1 ]; then \
+		echo "??    stranded .tflock: no single state bucket to look in." >&2; \
+		echo "      The bucket carries a per-account random suffix, so its name is" >&2; \
+		echo "      not in the tree. Set TF_STATE_BUCKET, or create the gitignored" >&2; \
+		echo "      envs/<env>/backend.hcl from the example beside it. Section 5.2 of" >&2; \
+		echo "      docs/TEARDOWN.md is the check this skipped." >&2; \
+		incomplete=1; \
+	else \
+		sweep "stranded .tflock objects in $${state_bucket}" \
+			aws s3api list-objects-v2 --region "$$state_region" --bucket "$$state_bucket" \
+			--output text --query "Contents[?ends_with(Key, '.tflock')].Key"; \
+	fi; \
+	printf '\n'; \
+	if [ "$$dirty" -ne 0 ]; then \
+		echo "make: verify-teardown found resources matching this module's naming." >&2; \
+		echo "      Each is listed above by name. Match it against the module's" >&2; \
+		echo "      naming before removing anything by hand — section 6.3 of" >&2; \
+		echo "      docs/TEARDOWN.md: this account may hold resources this" >&2; \
+		echo "      repository did not create." >&2; \
+		finish leak 1; \
+	fi; \
+	if [ "$$incomplete" -ne 0 ]; then \
+		echo "make: verify-teardown could not run every check, so it is not saying" >&2; \
+		echo "      the account is clean — it is saying it did not finish asking." >&2; \
+		echo "      Each unfinished check is marked '??' above with the reason." >&2; \
+		finish incomplete 2; \
+	fi; \
+	echo "verify-teardown: nothing matching $${site}* is standing in this account right now,"; \
+	echo "                 and no resource carries Project=$${project} with any of this"; \
+	echo "                 repository's Env values, in $${env_region} or us-east-1."; \
+	echo ""; \
+	echo "                 That is what this establishes and the whole of it. It looked"; \
+	echo "                 for the resource types this module creates today, under the"; \
+	echo "                 name_prefix this tree declares today. A type the module gains"; \
+	echo "                 later needs a check added here, and a leak from a cycle run"; \
+	echo "                 under a different prefix is outside every query above."; \
+	echo ""; \
+	finish clean 0
