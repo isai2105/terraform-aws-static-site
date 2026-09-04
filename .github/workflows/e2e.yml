@@ -175,19 +175,28 @@
 name: e2e
 
 on:
-  schedule:
-    # Weekly, Monday morning UTC, and deliberately not on the hour: GitHub
-    # queues scheduled runs and the top of the hour is where the queue is
-    # longest, so `0 4 * * 1` buys a delay and nothing else. Early in the week
-    # so a failure has the week to be dealt with rather than a weekend to sit
-    # through.
-    #
-    # A scheduled workflow is disabled automatically after 60 days without
-    # repository activity. On a reference repository that goes quiet between
-    # bursts of work, that is a live failure mode and not a footnote: the run
-    # that stops happening is silent, and the first sign of it is this
-    # workflow's history simply ending.
-    - cron: "17 4 * * 1"
+  # Weekly, Monday morning UTC, and deliberately not on the hour: GitHub
+  # queues scheduled runs and the top of the hour is where the queue is
+  # longest, so `0 4 * * 1` buys a delay and nothing else. Early in the week
+  # so a failure has the week to be dealt with rather than a weekend to sit
+  # through.
+  #
+  # A scheduled workflow is disabled automatically after 60 days without
+  # repository activity. On a reference repository that goes quiet between
+  # bursts of work, that is a live failure mode and not a footnote: the run
+  # that stops happening is silent, and the first sign of it is this
+  # workflow's history simply ending.
+  #
+  # Commented out rather than left active: a weekly unattended apply/destroy
+  # against a real AWS account is a real, ongoing cost — infrastructure
+  # churn and failure noise nobody is watching for — and this portfolio
+  # project doesn't need to keep paying it on a schedule. The drift-
+  # detection value this buys is real (see the file header above), just not
+  # worth it every week. Re-enabling is a deliberate, reviewable edit —
+  # uncomment `schedule:` and the `cron:` line below — rather than a
+  # settings toggle that leaves no trail of when or why it changed.
+  # schedule:
+  #   - cron: "17 4 * * 1"
 
   # On demand as well, because the reason to run this is usually "does it still
   # work after that change" and waiting until Monday to find out is not a plan.
