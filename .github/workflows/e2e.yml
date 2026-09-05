@@ -368,63 +368,6 @@ jobs:
           # reads those outputs.
           terraform_wrapper: false
 
-      # -----------------------------------------------------------------------
-      # TEMPORARY — the A1b probe. Revert this step and the
-      # `inline-session-policy` below as soon as one run has been read. This is
-      # an experiment, not a control, and it is not meant to ship.
-      # -----------------------------------------------------------------------
-      #
-      # The question it answers is the only unverified assumption in
-      # docs/CLOUDFRONT_IAM_SCOPING_PLAN.md: does CloudFront's
-      # authorization-time tag read keep up with the `GetDistribution` poll the
-      # provider starts seconds after `CreateDistributionWithTags` returns?
-      # `wait_for_deployment = true` means that poll runs on every apply. No AWS
-      # document settles the consistency question, and neither research pass
-      # could.
-      #
-      # Why it is a `Deny` when the change it models is an `Allow`. A
-      # `StringNotLike` against a tag key that cannot be read evaluates true, so
-      # this denies under exactly the circumstances A1b's `Allow` + `StringLike`
-      # would fail to match. Identical call, identical moment, no bootstrap
-      # change and no mirror re-sync — which is the whole point: reverting it is
-      # one workflow file rather than a hand-applied `PutRolePolicy` across
-      # every apply role and every out-of-repo mirror of it.
-      #
-      # It is not a safer experiment, only a cheaper revert. If the assumption
-      # fails, the apply dies at the poll *after* the distribution already
-      # exists. Check whether Terraform recorded the id in state before
-      # erroring; if it did not, the distribution is orphaned outside state and
-      # has to be deleted by hand.
-      #
-      # A green run is evidence, not a contract: AWS publishes nothing about
-      # authorization-time tag consistency for CloudFront, so what it
-      # establishes is observed behaviour that could in principle regress.
-      #
-      # The prefix is read rather than hardcoded, and that is not fastidiousness
-      # — it is what makes the result readable. A `StringNotLike` against a
-      # pattern that cannot match denies, so a wrong prefix fails the run in
-      # precisely the way a genuine consistency failure would, and the probe
-      # returns a false negative on the one question it exists to ask. The
-      # distribution's `Name` tag is `local.bucket_name`, built by
-      # modules/static-site/s3.tf as
-      # `<name_prefix>-site-<environment>-<random hex>`, so `<prefix>-site-*`
-      # matches it.
-      - name: Read the site name prefix for the A1b probe
-        id: probe-prefix
-        shell: bash
-        run: |
-          prefix="$(sed -n 's/^[[:space:]]*name_prefix[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-            "envs/${ENVIRONMENT}/terraform.tfvars" | head -n 1)"
-          if [ -z "$prefix" ]; then
-            echo "::error::could not read name_prefix from envs/${ENVIRONMENT}/terraform.tfvars." \
-              "The probe below would then deny every GetDistribution call and this run" \
-              "would look like the consistency failure it exists to test for. Refusing" \
-              "rather than reporting a result that cannot be told apart from the answer."
-            exit 1
-          fi
-          echo "prefix=${prefix}" >> "$GITHUB_OUTPUT"
-          echo "A1b probe will allow GetDistribution only on Name like ${prefix}-site-*"
-
       - name: Assume the apply role
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
@@ -434,16 +377,6 @@ jobs:
           # so that an unattended apply is distinguishable in the trail from a
           # dispatched one.
           role-session-name: e2e-stage-${{ github.run_id }}
-          # TEMPORARY — the A1b probe; see the comment on the step above, and
-          # revert both together. An inline session policy is intersective, so
-          # the `Allow *` is load-bearing: without it this document would grant
-          # nothing and the credential would be empty.
-          inline-session-policy: >-
-            {"Version":"2012-10-17","Statement":[
-            {"Effect":"Allow","Action":"*","Resource":"*"},
-            {"Effect":"Deny","Action":"cloudfront:GetDistribution","Resource":"*",
-            "Condition":{"StringNotLike":{"aws:ResourceTag/Name":
-            "${{ steps.probe-prefix.outputs.prefix }}-site-*"}}}]}
 
       # Terraform is invoked directly rather than through the Makefile, for the
       # reason plan.yml and apply.yml give: the Makefile's targets init with
