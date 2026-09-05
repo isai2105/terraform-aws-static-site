@@ -281,9 +281,23 @@ variable "log_retention_days" {
 # root created, which nothing here can see.
 #
 # The app repository's *name* is not among them. It is a constant in iam.tf,
-# because the bootstrap scopes both apply roles to the hardcoded ARN pattern
-# `role/react-cloudfront-app-deploy-*` and a role named anything else cannot be
-# created by CI at all.
+# because the bootstrap scopes both apply roles' grants over that role to the
+# exact ARN `role/react-cloudfront-app-deploy-<env>`, and a role named anything
+# else cannot be created by CI at all.
+#
+# `ManageAppDeployRoleBounded` and `ManageAppDeployRoleUnbounded` name one exact
+# ARN each, so the environment *suffix* is enforced by IAM and not only the
+# prefix: a `var.environment` the bootstrap's `var.environments` does not list
+# produces a role name refused at `iam:CreateRole`. That is a fifth thing this
+# module cannot resolve for itself, and unlike the four inputs above it fails in
+# AWS rather than in validation.
+#
+# The wildcard has not left `bootstrap/oidc.tf`, so do not read that as "the
+# pattern is gone": `local.app_deploy_role_arn` still holds
+# `role/react-cloudfront-app-deploy-*` for the plan role's `ReadCiIdentity`,
+# which has to read every environment's deploy role. It is the apply roles that
+# carry no wildcard over this one. iam.tf argues the whole of it beside
+# `app_deploy_role_name`.
 
 variable "github_oidc_provider_arn" {
   description = <<-EOT

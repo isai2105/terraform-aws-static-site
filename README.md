@@ -196,7 +196,11 @@ have forked `react-cloudfront-app`, read the two numeric ids from it with
 not, put your own GitHub owner id and any numeric repository id in and carry on: the environment
 still applies, and what you get is a deploy role whose trust subject no token will ever match —
 harmless, and destroyed with the environment. The role's *name* is not configurable at all, since
-the bootstrap scopes both apply roles to the pattern `role/react-cloudfront-app-deploy-*`.
+the bootstrap scopes both apply roles to the exact ARN
+`role/react-cloudfront-app-deploy-<env>`, composed per environment from the `environments` list
+in `bootstrap/terraform.tfvars`. The `<env>` suffix is enforced as much as the prefix is, so do
+not assume any suffix will do: an environment name here that the bootstrap was not given fails at
+`iam:CreateRole` rather than applying quietly.
 
 ### 3. Apply
 
@@ -243,15 +247,23 @@ destroys measured on 2026-08-27 was killed 90 seconds in, which cost a stranded 
 recovery — `docs/TEARDOWN.md` section 5 is that recovery, written from the real event.
 
 **A destroy exiting 0 is a claim, not evidence.** `docs/TEARDOWN.md` section 6 is an eleven-row
-sweep against AWS rather than against Terraform, and four of its rows exist because nothing else
-can see them. Cache policies, response headers policies, origin access controls and CloudFront
-functions all expose no tags at all — the CloudFront API has nowhere to put them — so a leak in
-any of the four is invisible to a tag query, and no amount of tagging harder fixes it. Two of
-them each burn one of two quotas of **20 per account**: the custom cache policies and the custom
-response headers policies. The other two are named with the bucket's random suffix, so a leak
-collides with nothing on the next apply and a name-stable check cannot see it either. The quota
-failure surfaces later, at *apply* time, on an unrelated environment, naming nothing about the
-leak that caused it.
+sweep against AWS rather than against Terraform, and four of its rows exist because no tag query
+is known to cover them. Cache policies, response headers policies and origin access controls expose no tags
+at all — the CloudFront API has nowhere to put them — so a leak in any of the three is invisible
+to a tag query, and no amount of tagging harder fixes it. Two of them each burn one of two quotas
+of **20 per account**: the custom cache policies and the custom response headers policies. The
+origin access control and the CloudFront function are named with the bucket's random suffix, so a
+leak collides with nothing on the next apply and a name-stable check cannot see it either. The
+quota failure surfaces later, at *apply* time, on an unrelated environment, naming nothing about
+the leak that caused it.
+
+The CloudFront function is not a fourth untaggable type, and counting it as one is the easy
+mistake here: `aws_cloudfront_function` is taggable and carries this repository's `default_tags`
+already — `bootstrap/oidc.tf`'s `TagSiteCdnResources` grant exists partly because of it. Nor does
+that make it covered. Whether the resource groups tagging API returns one — the query the
+teardown assertion actually makes — has not been measured since the function was added, so its
+coverage is unproven in either direction. The function's row in section 6 therefore stands on its
+name, not on a tag barrier, and `docs/TEARDOWN.md` section 6.1 says so.
 
 To return the account to empty, tear down the bootstrap too — `docs/TEARDOWN.md` section 8. Three
 phases, and the order does not survive being rearranged: confirm nothing still carries the
@@ -379,9 +391,11 @@ Specific ones, with what each buys and what it would cost to choose differently.
   `/static-site/<env>/<key>`, carrying no `name_prefix` at all — a consumer that had to know the
   bucket's random suffix to find the parameter holding the suffix would be back where it started.
   The app deploy role is `react-cloudfront-app-deploy-<env>`, deliberately outside the convention
-  because the bootstrap scopes both apply roles to `role/react-cloudfront-app-deploy-*` and
-  following the convention would fail at `CreateRole` — `modules/static-site/iam.tf` says so at
-  the line. Its inline policy is named just `deploy`. And the sixth: the log group carries the
+  because the bootstrap scopes both apply roles to the exact ARN
+  `role/react-cloudfront-app-deploy-<env>` and following the convention would fail at
+  `CreateRole` — `modules/static-site/iam.tf` says so at the line. Note that the grant names the
+  environment exactly rather than a `-*` prefix, so a name that merely starts right is refused
+  too. Its inline policy is named just `deploy`. And the sixth: the log group carries the
   pattern only as a suffix, under `/aws/vendedlogs/cloudfront/`, which is why `docs/TEARDOWN.md`
   §6 queries it by the full path rather than by a bare prefix glob.
 

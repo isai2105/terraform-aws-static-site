@@ -78,11 +78,27 @@ data "aws_partition" "current" {}
 
 locals {
   # The app repository's name, a constant rather than an input, and that is a
-  # contract rather than an economy. `bootstrap/oidc.tf` scopes both apply roles
-  # to the hardcoded ARN pattern `role/react-cloudfront-app-deploy-*`, so a role
-  # named anything else cannot be created by CI at all. Written once here
+  # contract rather than an economy. `bootstrap/oidc.tf` scopes both apply roles'
+  # IAM grants over this role to an ARN composed from this same literal, so a
+  # role named anything else cannot be created by CI at all. Written once here
   # because it appears twice below — in the role name and in the trust subject —
   # and two literals are two chances to change one of them.
+  #
+  # That ARN is exact rather than a pattern. `ManageAppDeployRoleBounded` and
+  # `ManageAppDeployRoleUnbounded` are rendered per environment out of
+  # `local.app_deploy_role_arns_by_environment` and grant on
+  # `role/react-cloudfront-app-deploy-<env>`, so the apply roles carry no
+  # wildcard over this role at all — which changes what IAM checks, not just how
+  # the grant is spelled. See the note beside `app_deploy_role_name` below.
+  #
+  # Be exact about the scope of that, because the tempting summary — "the
+  # wildcard is gone" — is wrong and would send the next reader looking for a
+  # pattern that is still there. `local.app_deploy_role_arn` still holds
+  # `role/react-cloudfront-app-deploy-*`, and the plan role's `ReadCiIdentity`
+  # still grants on it deliberately, so that a pull-request plan can read every
+  # environment's deploy role rather than only its own. It is the *apply* roles
+  # that carry no wildcard over this role, and they are the ones that create this
+  # resource.
   app_repository = "react-cloudfront-app"
 
   # Deliberately *not* `${var.name_prefix}-…`, which is this module's convention
@@ -90,12 +106,34 @@ locals {
   # and following the convention here would fail at `CreateRole` before anything
   # else was attempted.
   #
-  # Simulation against both apply roles confirms the trailing `*` is a real
-  # wildcard — `-dev` and `-stage-extra` are allowed too — so the exact suffix
-  # is this repository's convention rather than something IAM enforces, and a
-  # typo in it will not be caught at `CreateRole`. It would be caught in the
-  # other repository, as a trust that matches and a role that is not the one its
-  # workflow names.
+  # The suffix is enforced by IAM, and a wrong one dies at `iam:CreateRole`.
+  # `ManageAppDeployRoleBounded` and `ManageAppDeployRoleUnbounded` are rendered
+  # once per environment against the exact ARN
+  # `role/react-cloudfront-app-deploy-<env>`, so the apply role that creates this
+  # resource holds `iam:CreateRole` on one role name and no other.
+  #
+  # Do not take the wildcard that survives elsewhere as evidence that IAM is
+  # indifferent to this suffix. `bootstrap/oidc.tf` keeps
+  # `local.app_deploy_role_arn` and, beside it, a live simulation showing that a
+  # trailing `*` there really is a wildcard — `-dev` and `-stage-extra` are
+  # allowed under it. That measurement is of what a trailing `*` means to IAM and
+  # it stands; it says nothing about the principals that create this role, which
+  # grant on an exact ARN with no `*` in it.
+  #
+  # So `var.environment` here has to equal the matching entry in the bootstrap's
+  # `var.environments` character for character. A typo or a variation in this
+  # suffix — `-blue`, `-canary`, `-stage-extra`, a capitalised `-Stage` — is
+  # refused at `iam:CreateRole` with an `AccessDenied` naming an ARN that appears
+  # in neither this file nor `bootstrap/oidc.tf`, in the apply that introduces it.
+  # That is the second half of a coupling `bootstrap/oidc.tf` describes as
+  # deliberate: two strings in two roots, with a first-apply error holding them
+  # equal.
+  #
+  # The other repository has a failure mode for this name too — a trust that
+  # matches and a role that is not the one its workflow names — and it is real,
+  # but it is reachable only for a suffix IAM already allows: an environment the
+  # bootstrap does list and the app repository's workflow spells differently. It
+  # is not where a wrong suffix surfaces first.
   app_deploy_role_name = "${local.app_repository}-deploy-${var.environment}"
 
   # GitHub's immutable subject format, with the numeric owner and repository ids
@@ -201,13 +239,23 @@ resource "aws_iam_role" "app_deploy" {
 
   assume_role_policy = data.aws_iam_policy_document.app_deploy_assume_role.json
 
-  # `path` is deliberately absent, and this is the one of the four contracts that
-  # IAM itself enforces. A role at `/app/` has the ARN
-  # `role/app/react-cloudfront-app-deploy-<env>`, which does not match the
-  # bootstrap's `role/react-cloudfront-app-deploy-*` pattern — simulation returns
-  # `implicitDeny` for it. There is no default to state explicitly here: the
-  # provider omits the field, and writing `path = "/"` would be a value this
-  # module then owned for no reason.
+  # `path` is deliberately absent, and IAM enforces it. A role at `/app/` has the
+  # ARN `role/app/react-cloudfront-app-deploy-<env>`, which is not the ARN the
+  # apply roles' `iam:CreateRole` grant names — live simulation returns
+  # `implicitDeny` for it against the `role/react-cloudfront-app-deploy-*`
+  # pattern, and the exact per-environment ARN those roles name refuses it for the
+  # same reason and more narrowly still. There is no default to state explicitly
+  # here: the provider omits the field, and writing `path = "/"` would be a value
+  # this module then owned for no reason.
+  #
+  # The path is not the only one of the four contracts at the top of this file
+  # that IAM itself enforces, and reading it that way would leave the other two
+  # looking like conventions. Three of the four are checked at create time: this
+  # path; the permissions boundary below, through a `StringEquals` condition on
+  # the same `iam:CreateRole` grant; and the role's name suffix, because both
+  # apply roles grant on one exact per-environment ARN, which is what the note
+  # beside `app_deploy_role_name` above is about. The trust policy is the one of
+  # the four that nothing in this account enforces at create time.
 
   # Mandatory, not defensive. `iam:CreateRole` on both apply roles is granted
   # only inside a `StringEquals` condition on the `iam:PermissionsBoundary`

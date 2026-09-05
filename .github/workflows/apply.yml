@@ -661,6 +661,259 @@ jobs:
             -backend-config="region=${TF_STATE_REGION}" \
             -backend-config="use_lockfile=true"
 
+      # Narrow the credential a destroy runs on to this environment's own
+      # distribution. docs/CLOUDFRONT_IAM_SCOPING_PLAN.md A4.
+      #
+      # The apply role holds `cloudfront:DeleteDistribution` and
+      # `cloudfront:UpdateDistribution` on `Resource: "*"`, and that is not
+      # sloppiness: CloudFront's create operations take no resource type at all
+      # in AWS's authorization model, so the statement that grants the create
+      # cannot be narrowed and the destructive verbs have ridden along with it.
+      # What *is* knowable by the time a destroy runs is the id AWS assigned
+      # this environment's distribution — it is in the state this job has just
+      # initialised — and a destroy is the only thing that needs those verbs.
+      # So the credential is re-minted below with a session policy naming that
+      # one ARN, and the same call against anything else in the account is
+      # refused for the length of that session.
+      #
+      # Two new steps rather than one, and both are new here where `e2e.yml`
+      # only had to extend a step it already had: this workflow runs no
+      # `terraform output` anywhere else, because the artefact split means it
+      # has never needed to read anything back out of state.
+      #
+      # Gated on the destroy action. On an apply there is nothing to pin to —
+      # the distribution may not exist yet, and on a first apply certainly does
+      # not — and the apply is the operation whose whole job is to call the
+      # creates this cannot narrow anyway.
+      #
+      # **Nothing between here and "Apply the plan" may fail the job.** That
+      # step carries the default `if: success()`, so anything that goes red in
+      # between skips the destroy entirely and leaves the environment standing
+      # — precisely the fail-closed outcome A4 rules out. There are two ways to
+      # go red and each needs its own guard: every command in *this* step is
+      # written so it cannot exit non-zero, and the re-assume below carries
+      # `continue-on-error: true` because it is a live
+      # `AssumeRoleWithWebIdentity` against AWS and no amount of care in this
+      # step can stop that call failing.
+      - name: Build the destroy-time session policy
+        id: session-policy
+        if: inputs.action == 'destroy'
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          ROLE_ARN: ${{ vars.AWS_APPLY_ROLE_ARN }}
+        run: |
+          policy=""
+
+          # The partition and the account id are parsed out of the role ARN
+          # this job has already assumed, rather than read back from
+          # `aws sts get-caller-identity`.
+          #
+          # The partition first, because that is a correctness bug rather than
+          # a preference. An earlier draft hardcoded `arn:aws:`, and a wrong
+          # ARN inside a `Deny` + `NotResource` is not a harmless no-op: the
+          # real ARN is then absent from `NotResource`, so the Deny matches the
+          # destroy's *own* `UpdateDistribution` (the disable) and
+          # `DeleteDistribution`, and the environment strands half torn down.
+          # On aws-us-gov or aws-cn that would fire on every destroy through
+          # this path, every time. `bootstrap/oidc.tf` composes every ARN it
+          # writes from `data.aws_partition.current.partition` and hardcodes
+          # none; this is the same rule one layer out.
+          #
+          # It also removes the only live AWS call this step used to make, from
+          # a step whose entire contract is that it cannot fail —
+          # `get-caller-identity` can time out, and its `|| true` then produced
+          # the unnarrowed fallback silently. The role ARN is a workflow
+          # variable, and it is already non-empty by the time this job exists:
+          # the plan job this one depends on refuses to run without it, and the
+          # step above assumed the role with it. A malformed one is handled by
+          # the pattern rather than assumed away — no match, no policy, and the
+          # fail-open branch below.
+          partition=""
+          account=""
+          if [[ "$ROLE_ARN" =~ ^arn:([a-z0-9-]+):iam::([0-9]{12}):role/.+$ ]]; then
+            partition="${BASH_REMATCH[1]}"
+            account="${BASH_REMATCH[2]}"
+          fi
+
+          # `|| true` *and* a shape check, and both halves are load-bearing.
+          #
+          # `terraform output -raw <name>` exits non-zero on an output that
+          # does not exist, which the `|| true` absorbs — but against a state
+          # carrying no outputs at all it prints `Warning: No outputs found` to
+          # stderr and exits **0** with empty stdout. An exit-status guard
+          # alone therefore lets an empty value through, and an empty value
+          # interpolated below produces a malformed ARN rather than no policy.
+          # Empty is treated exactly as unreadable.
+          #
+          # The pattern is the other half. A CloudFront distribution id is `E`
+          # followed by upper-case alphanumerics, and `distribution_id` sits one
+          # output away from `distribution_arn` in
+          # `modules/static-site/outputs.tf`. An edit that returned the ARN
+          # would compose `arn:<p>:cloudfront::<acct>:distribution/arn:<p>:...`
+          # here — syntactically valid, matching no resource, and therefore
+          # denying the destroy its own calls by the mechanism described above.
+          # Anything that is not an id is emptied and falls through to the
+          # fail-open branch.
+          dist_id_raw="$(terraform -chdir="envs/${ENVIRONMENT}" output -raw distribution_id || true)"
+          dist_id=""
+          if [[ "$dist_id_raw" =~ ^E[A-Z0-9]{9,25}$ ]]; then
+            dist_id="$dist_id_raw"
+          fi
+
+          if [ -z "$dist_id" ] || [ -z "$partition" ] || [ -z "$account" ]; then
+            # Fail **open**, deliberately. An unreadable id means the destroy
+            # runs on the credential it runs on today, which makes this a bypass
+            # by construction and is exactly why A4 is described as
+            # defence-in-depth rather than as a boundary — the apply path holds
+            # the same unnarrowed credential, and nothing here closes a route
+            # against somebody holding it. Failing closed instead would refuse
+            # to tear an environment down because a value could not be read,
+            # leaving a live distribution running. That is the worse outcome, so
+            # the fallback is loud rather than fatal.
+            echo "::warning::could not build the destroy-time session policy" \
+              "(distribution id: ${dist_id_raw:-unreadable}, partition:" \
+              "${partition:-unreadable}, account id: ${account:-unreadable})," \
+              "so this destroy will run on the" \
+              "unnarrowed apply credential. This is a defence-in-depth control" \
+              "and not a boundary; see docs/CLOUDFRONT_IAM_SCOPING_PLAN.md A4"
+          else
+            # `acm:DeleteCertificate` is deliberately **not** in this Deny.
+            # This paragraph exists so that its absence does not read as an
+            # oversight and is not helpfully restored by the next editor.
+            #
+            # An earlier draft added the action and carved the `certificate_arn`
+            # output out of the `NotResource`, on the reading that this
+            # environment's own certificate must stay deletable. That output
+            # does not mean what the draft needed it to mean.
+            # `modules/static-site/certificate.tf` sets
+            # `manage_certificate = local.custom_domain_enabled && var.acm_certificate_arn == null`,
+            # and `local.viewer_certificate_arn` — which is what
+            # `modules/static-site/outputs.tf` publishes — returns the
+            # **caller's** ARN in the unmanaged branch.
+            # `modules/static-site/variables.tf` says outright that the module
+            # does not create, renew, tag or destroy a supplied certificate and
+            # that it survives `terraform destroy`. So when a caller brings a
+            # shared certificate, the destroy never calls
+            # `acm:DeleteCertificate` at all, and the draft would have carved
+            # somebody else's certificate out of a Deny — a control whose whole
+            # claim is that it can only subtract, adding.
+            #
+            # The other branches are no better. With `certificate_arn` null
+            # there is nothing to protect and the statement buys nothing. With
+            # it non-null, nothing available here distinguishes managed from
+            # unmanaged, and denying the delete outright would strand a
+            # certificate this environment does own. The ACM half is not
+            # buildable from root outputs, so it is left out rather than left
+            # wrong.
+            #
+            # Reinstating it needs the managed/unmanaged distinction from
+            # somewhere that carries it: `terraform show -json` filtered for
+            # `aws_acm_certificate` / `aws_acm_certificate_validation` under
+            # `.values.root_module.child_modules[0].resources[]` — the read A4
+            # defers along with the twelve untaggable actions — or a new module
+            # output stating ownership rather than the ARN. Not from
+            # `certificate_arn`.
+            #
+            # One `Deny`, one service, and that is a rule rather than an
+            # accident of there being only one left: `NotResource` is evaluated
+            # per statement, so merging two services into one Deny carves each
+            # service's ARN out of the other service's deny. A second service
+            # gets a second statement.
+            deny_actions='"cloudfront:DeleteDistribution","cloudfront:UpdateDistribution"'
+            not_resource="\"arn:${partition}:cloudfront::${account}:distribution/${dist_id}\""
+
+            # The `{"Effect":"Allow","Action":"*","Resource":"*"}` below looks
+            # like it defeats the point of the document and is the one line here
+            # that must not be removed.
+            #
+            # A session's permissions are the **intersection** of the role's
+            # identity policy and the session policy — AssumeRoleWithWebIdentity's
+            # own wording, quoted in docs/CLOUDFRONT_IAM_SCOPING_ANALYSIS.md
+            # section 3.8. A document carrying only the Deny therefore intersects
+            # the role's grants with nothing at all and yields an *empty*
+            # permission set, not a narrowed one: the destroy would die on its
+            # first `s3:GetObject` reading the state file, long before CloudFront
+            # is reached, and the control added to make teardown safer would be
+            # the thing that stranded the environment. The Allow is what makes
+            # this document mean "the role's policy, minus this Deny".
+            #
+            # `NotResource` rather than an Allow naming the ARN, for the same
+            # reason from the other side: a positive Allow would have to restate
+            # every permission a destroy needs — S3, CloudWatch Logs, SSM, IAM,
+            # the log-delivery APIs — and would be wrong the first time the
+            # module grew a resource type. The Deny subtracts; the Allow above
+            # carries everything else through untouched.
+            policy="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"},{\"Effect\":\"Deny\",\"Action\":[${deny_actions}],\"NotResource\":[${not_resource}]}]}"
+
+            # Printed with its length because the plaintext limit on a session
+            # policy is 2,048 characters and this is the only place the real
+            # figure is visible. There are exactly two forms this can take now:
+            # the empty string, and this one — 256 or 257 characters against a
+            # real 13- or 14-character distribution id in the `aws` partition,
+            # 264 at most in `aws-us-gov`, and 276 at the 26-character ceiling
+            # the shape check above imposes. An earlier comment said ~370;
+            # that was the with-certificate figure, and the certificate is gone.
+            echo "session policy (${#policy} of 2048 characters): ${policy}"
+          fi
+
+          printf 'session-policy=%s\n' "$policy" >> "$GITHUB_OUTPUT"
+
+      # A second `AssumeRoleWithWebIdentity` against the same role, not a
+      # different role and not a second grant. A session policy can only
+      # subtract — the session's permissions are the intersection of the role's
+      # identity policy and this document — so there is no version of this step
+      # that widens anything, and no bootstrap change stands behind it. That is
+      # the property that makes A4 reversible by `git revert` where the IAM tag
+      # conditions are a hand-run `PutRolePolicy` across every apply role.
+      #
+      # `continue-on-error: true`, and it is the line that keeps this control
+      # fail-open rather than fail-closed. Everything in the step above is
+      # written so it cannot exit non-zero — but this step is a live
+      # `AssumeRoleWithWebIdentity`, and a live call fails for reasons no guard
+      # upstream can prevent: STS throttling, a `MalformedPolicyDocument` on a
+      # document this file composed wrong, a trust-policy edit landing
+      # mid-flight. Without this line such a failure is red, "Apply the plan"
+      # below inherits the default `if: success()` and is **skipped**, and the
+      # run ends having destroyed nothing with the environment still standing.
+      # A control added to make teardown safer would have become the thing that
+      # stranded it. With it, the failure is reported by the step below and the
+      # destroy proceeds on the credential it has always run on — the same
+      # fallback the unreadable-output path takes.
+      #
+      # The `!= ''` half is that other fallback: when the policy could not be
+      # built this step is skipped, and a skipped step also leaves
+      # "Apply the plan" running. This control is defence-in-depth, not a
+      # boundary.
+      #
+      # A distinct session name so CloudTrail separates the narrowed session
+      # from the wide one this job assumed before `init`.
+      - name: Re-assume the apply role for the destroy, narrowed
+        id: reassume
+        if: inputs.action == 'destroy' && steps.session-policy.outputs.session-policy != ''
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: destroy-narrowed-${{ inputs.environment }}-${{ github.run_id }}
+          inline-session-policy: ${{ steps.session-policy.outputs.session-policy }}
+
+      # `continue-on-error` hides the failure from the job's status, which is
+      # the whole point of it — so the failure is re-surfaced here as a warning
+      # instead. Without this the narrowing could stop working entirely and
+      # every run would still be green. The action leaves the credentials it did
+      # not replace in place, so the destroy that follows runs on the wide
+      # session assumed before `init`, which is the documented fallback.
+      - name: Warn if the destroy could not be narrowed
+        if: always() && steps.reassume.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::warning::the narrowed re-assume failed, so this destroy runs" \
+            "on the unnarrowed apply credential. This is a defence-in-depth" \
+            "control and not a boundary, so the destroy is allowed to proceed;" \
+            "see docs/CLOUDFRONT_IAM_SCOPING_PLAN.md A4"
+
       # No `-auto-approve`, and its absence is the point: applying a saved plan
       # never prompts, because the decision it would prompt for was made when
       # the plan was approved. The flag would be inert here and would suggest,

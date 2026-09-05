@@ -10,14 +10,40 @@
 # only those without an Authorization header, which is what allows the bucket
 # policy in s3.tf to name a single SourceArn and trust nothing else.
 #
-# This resource is untaggable too (see the tagging note in policies.tf), and
-# unlike the policies there its name carries the bucket's random suffix — so a
-# leaked OAC is invisible to the tag-based teardown assertion *and* collides
-# with nothing on the next apply, leaving it the one resource here that no
-# automatic check detects. The name is left alone rather than made stable
-# because the quota is 100 per account against the policies' 20, so the
-# accumulation pressure is an order of magnitude lower; a sweep by name prefix
-# finds it if that ever stops being true.
+# This resource is untaggable — genuinely so, and it is the only resource in
+# this file that is: `aws_cloudfront_origin_access_control` exposes no `tags`
+# argument and no `tags_all` attribute in the provider schema (see the tagging
+# note in policies.tf, and the function's own note further down). Unlike the
+# policies there its name carries the bucket's random suffix, so a leaked OAC is
+# invisible to the tag-based teardown assertion *and* collides with nothing on
+# the next apply. Those two facts together are why it is swept by name.
+#
+# Two overclaims are easy to reach from there, and neither is supported.
+#
+# The OAC is not "the one resource here that no automatic check detects". It is
+# detected: `make verify-teardown` lists origin access controls in us-east-1 and
+# filters them on the `<name_prefix>-site-` prefix — row 4 of the checklist in
+# docs/TEARDOWN.md section 6, whose last line that document calls the whole of
+# the machine-readable contract. The true, narrower statement: nothing
+# *unattended* sees it. No workflow runs that target, the tag-based assertion in
+# e2e.yml cannot cover an untaggable resource, and a stable-name collision cannot
+# cover a name carrying a random suffix. The same target sweeps the
+# viewer-request function below, by the same prefix, in the same run.
+#
+# Nor does the function being taggable make this resource's position "exactly
+# true rather than approximately so". That helps itself to a certainty the
+# paragraph below explicitly declines: whether the resource groups tagging API
+# returns a CloudFront function has not been measured here, so the function's
+# standing against a tag query is unproven in either direction, and this
+# resource's uniqueness cannot be settled further than that question is. What can
+# be said without it, and is all that is claimed: the OAC is untaggable and the
+# function is not. That is a difference between the resources, not a difference
+# anybody has observed in what a check returns.
+#
+# The name is left alone rather than made stable because the quota is 100 per
+# account against the policies' 20, so the accumulation pressure is an order of
+# magnitude lower; a sweep by name prefix finds it if that ever stops being
+# true.
 resource "aws_cloudfront_origin_access_control" "site" {
   name                              = local.bucket_name
   description                       = "Signs CloudFront origin requests to the ${var.environment} site bucket."
@@ -124,14 +150,55 @@ resource "aws_cloudfront_origin_access_control" "site" {
 # (see `default_root_object` below).
 resource "aws_cloudfront_function" "spa_routing" {
   # The name carries the bucket's random suffix, exactly as the origin access
-  # control above does and for the same two reasons: a CloudFront Function is
-  # account-scoped, so two environments would collide on a stable name, and it
-  # is untaggable, so a leaked one is invisible to the tag-based teardown
-  # assertion. Its own quota is 100 per account — the same number as the origin
-  # access control's and five times the policies' 20 — so the trade lands where
-  # that one landed: the accumulation pressure is low enough that a stable name
-  # is not worth the collision it would cause between environments, and a sweep
-  # by name prefix finds a leak. docs/TEARDOWN.md section 6.1 carries the sweep.
+  # control above does — but for one of that resource's two reasons rather than
+  # for both, and the second is worth naming so that it is not borrowed back.
+  #
+  # The reason that holds: a CloudFront Function is account-scoped, so two
+  # environments sharing a stable name would collide, and the collision would be
+  # a failed apply on whichever environment came second.
+  #
+  # The reason that does not carry over is untaggability. The function is *not*
+  # untaggable, so "a leaked one is invisible to the tag-based teardown
+  # assertion" is not a reason available here, however natural it looks beside the
+  # OAC. A CloudFront function is taggable — AWS's
+  # machine-readable service reference lists the `function` resource type under
+  # `TagResource`, `UntagResource` and `ListTagsForResource`, `CreateFunction`
+  # takes a `Tags` member, and `aws_cloudfront_function` carries the provider's
+  # `@Tags(identifierAttribute="arn")` annotation, which wires the generic
+  # tagging interceptor onto it. Function tagging landed in AWS provider 6.49.0,
+  # thirteen minor releases below the 6.62.0 the lock file here resolves under
+  # versions.tf's `~> 6.61`. Setting no `tags` argument on this resource does not
+  # make it untagged: it makes it carry the caller's `default_tags` and nothing
+  # else, so Project, Env, Owner, Repo and ManagedBy are on it already, put there
+  # by the same mechanism tags.tf takes a precondition on.
+  # `bootstrap/oidc.tf`'s `TagSiteCdnResources` statement depends on exactly that
+  # — the provider calls `ListTagsForResource` against this function's ARN on
+  # every read of it — and argues the dependency at length beside the grant.
+  #
+  # Do not overclaim in the other direction, which is the easier mistake from
+  # here. That the function is tagged does not establish that a tag query would
+  # return it. Whether the resource groups tagging API actually *returns* a
+  # CloudFront function is a separate question, and it has not been measured
+  # here: the two-region inventory in docs/TEARDOWN.md 6.2 was taken on
+  # 2026-08-27, before this resource existed, and nothing has re-run it since. So
+  # the honest position is that the barrier is unproven rather than proven — a
+  # weaker claim than "no tag query can see it", and a different one, and neither
+  # this comment nor the teardown documentation may be read as settling it.
+  #
+  # The untaggability claim has one source, and it is AWS's own sentence "you
+  # can't add tags to edge functions". Why that sentence says what it says is not
+  # worked out here and is deliberately not guessed at; anything asserting it of
+  # this resource is wrong by the argument above, reintroduction from the
+  # documentation included. `NON-PRODUCTION-PATTERNS.md` quotes an older README
+  # carrying it in one entry, and is annotated rather than rewritten, so a copy of
+  # the sentence survives there on purpose.
+  #
+  # None of it moves the naming decision. The quota is 100 per account — the same
+  # number as the origin access control's and five times the policies' 20 — so
+  # the accumulation pressure is low enough that a stable name is not worth the
+  # cross-environment collision it would cause, and a sweep by name prefix finds
+  # a leak on a local hand-run destroy, which is the path with no CI job to hang
+  # an assertion on. docs/TEARDOWN.md section 6.1 carries the sweep.
   #
   # Two CloudFront limits are met by caller-supplied values here, and both are
   # shown rather than asserted, the way policies.tf shows the CSP's. A function
@@ -153,8 +220,8 @@ resource "aws_cloudfront_function" "spa_routing" {
   # `const` and `let`, `async`/`await`, `String.prototype.replaceAll()`,
   # `atob`/`btoa` and the buffer module, each marked "new in JavaScript runtime
   # 2.0" on the feature page. Template literals and the crypto module are *not*
-  # among them: both are in 1.0, and citing them as the reason for this pin —
-  # as an earlier version of this comment did — is a check nobody made.
+  # among them: both are in 1.0, so citing either as the reason for this pin is a
+  # check nobody made, however plausible the pairing sounds.
   # Nearly every published copy of this rewrite still carries 1.0, including the
   # aws-samples repository AWS's own documentation links to, and a runtime
   # inherited by copying an example is not a decision anyone made. The code below
@@ -279,9 +346,9 @@ resource "aws_cloudfront_distribution" "site" {
   # the same cache behaviour, under the same policies.
   #
   # It stays because it is the half of the pair that keeps working on its own —
-  # a reader who deletes the function to see what it does still gets a homepage,
-  # and this argument no longer rests, as the previous version of it did, on
-  # error responses that no longer exist.
+  # a reader who deletes the function to see what it does still gets a homepage.
+  # The argument rests on that alone, and not on any custom error response, which
+  # this distribution deliberately does not declare.
   default_root_object = "index.html"
 
   # The custom domain, when there is one. Empty otherwise, which leaves the

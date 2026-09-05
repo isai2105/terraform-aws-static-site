@@ -247,9 +247,21 @@ with the environment, like everything else here. Its ARN is therefore stable
 only because its **name** is — so the name is part of the contract with the app
 repository, and renaming it is a breaking change over there, not a refactor in
 here. The name is also fixed from the other side: `bootstrap/oidc.tf` grants CI
-`iam:CreateRole` only on `role/react-cloudfront-app-deploy-*`, which is why this
-one role deliberately breaks the `<name_prefix>-` convention every other name in
-this module follows, and why it is created at the root path.
+`iam:CreateRole` only on the exact ARN `role/react-cloudfront-app-deploy-<env>`,
+which is why this one role deliberately breaks the `<name_prefix>-` convention
+every other name in this module follows, and why it is created at the root path.
+
+**The `<env>` suffix is checked by IAM, not just by convention.**
+`ManageAppDeployRoleBounded` and `ManageAppDeployRoleUnbounded` are rendered once
+per environment and name one exact ARN each, so a suffix composed from a
+`var.environment` the bootstrap's `var.environments` does not list — a `-blue`,
+a `-canary`, a typo — fails at `iam:CreateRole` on the first apply that
+introduces it, quoting an ARN that appears in neither repository. It does not
+ship quietly and surface later in the app repository. Note the limit of that: the
+wildcard `role/react-cloudfront-app-deploy-*` is still in `bootstrap/oidc.tf`,
+where the plan role's `ReadCiIdentity` grants on it so pull-request plans can
+read every environment's deploy role. It is the apply roles — the ones that
+create this role — that carry no wildcard over it.
 
 **Two clauses the consumer has to honour.** The trust names the **ref**, so the
 app repository's deploy job must declare **no** GitHub Environment: the

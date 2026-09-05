@@ -1050,15 +1050,24 @@ destroy-prod: check-terraform ## Destroy the prod environment. Prompts before re
 #
 # What it is for. A destroy exiting 0 is a claim about a state file, and the
 # resources most worth worrying about are the ones that leave state without
-# leaving AWS. Four of the types this module creates —
-# `aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy`,
-# `aws_cloudfront_origin_access_control` and `aws_cloudfront_function` — expose
-# no tags at all; the CloudFront API has nowhere to put them, and for the
-# function AWS says so outright: "You can't add tags to edge functions". So the
+# leaving AWS. Three of the types this module creates —
+# `aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy` and
+# `aws_cloudfront_origin_access_control` — expose no tags at all; the CloudFront
+# API has nowhere to put them. So the
 # tag-based assertion e2e.yml makes at the end of a lifecycle run is
 # structurally blind to a leak in any of them, and section 6.2 measures how
 # blind: tags cover 6 of the module's 18 resources. What finds the rest is a
 # sweep by name, which is this.
+#
+# `aws_cloudfront_function` is not a fourth on that list, whatever "You can't
+# add tags to edge functions" suggests: it is taggable — the provider exposes
+# tagging on it and this module's `default_tags` are already on it — so the
+# reason it is swept here is not a tag barrier. Do not read that the other way
+# either and conclude the tag assertion covers it. Whether the resource groups
+# tagging API returns a CloudFront function has never been measured in this
+# repository, so the sweep covers it on the ground that holds either way: its
+# name carries the site bucket's `random_id` suffix, so a leaked one collides
+# with nothing on the next apply and has no loud failure waiting for it.
 #
 # ONE ACCOUNT-WIDE TARGET, NOT `verify-teardown-stage` AND `-prod`. That breaks
 # the per-environment convention every other AWS-facing target in this file
@@ -1283,8 +1292,9 @@ destroy-prod: check-terraform ## Destroy the prod environment. Prompts before re
 # For the two policy types the 20-per-account quota puts 100 out of reach. For
 # functions it does not: that quota is 100, so an account at its function limit
 # is exactly the account whose leaked function falls off the end of the page —
-# and the CloudFront Function is already the resource with no other detector,
-# being untaggable and colliding with nothing on the next apply.
+# and the CloudFront Function is the resource whose other detectors are weakest:
+# it collides with nothing on the next apply, and whether the tag inventory sees
+# it is unmeasured, so this sweep is what it has.
 #
 # So those three queries ask for the marker as well as the names, in the same
 # call rather than a second one, by prepending a `!TRUNCATED!` element when
