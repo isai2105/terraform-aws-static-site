@@ -410,7 +410,7 @@ column of results is worth more than a number copied from the row above it.
 | 2 | Custom **cache policies** | Quota **20 per account**, account-wide; the module creates 2 per environment | **0** |
 | 3 | Custom **response headers policies** | Quota **20 per account**, account-wide; 2 per environment; invisible to any tag query | **0** |
 | 4 | **Origin access controls** | Quota 100 per account; the name carries the bucket's random suffix, so a leak is invisible to a name-stable check *and* to tags | **none** |
-| 5 | **CloudFront Functions** | Quota 100 per account; untaggable and named with the bucket's random suffix, so exactly as invisible as the origin access control above | **not measured — this resource postdates the walk-through** |
+| 5 | **CloudFront Functions** | Quota 100 per account; named with the bucket's random suffix, so a leak collides with nothing on the next apply. **Taggable** — the function carries the caller's `default_tags`, so whether row 10 would find a leaked one is an open question rather than a settled no; see 6.1 | **not measured — this resource postdates the walk-through** |
 | 6 | Log groups under `/aws/vendedlogs/cloudfront/<name_prefix>-site-*`, **in us-east-1** | Accrues cost after the environment is gone; retention bounds it, it does not remove it | **none** |
 | 7 | Delivery **sources**, **destinations** and **deliveries**, us-east-1 | Four resources that are permanently in us-east-1 whatever region the environment uses | **`[]` / `[]` / `[]`** |
 | 8 | ACM certificates in us-east-1 left `PENDING_VALIDATION`, and the validation record in your hosted zone | Section 7 — reachable only on the custom-domain path, which nothing here has applied | **none from this repository** |
@@ -457,20 +457,39 @@ the count is never zero.
 
 The third command is here for a different reason and it is worth being clear about which. The
 viewer-request function the module attaches to the default cache behaviour is on a quota of 100
-per account rather than 20, so it is not what will bite first — but it is untaggable, exactly as
-the policies and the origin access control are, so no tag query in this repository can see one
-that leaked. Its name carries the bucket's random suffix, which means a leak also collides with
-nothing on the next apply: unlike the policies, it has no loud failure waiting for it. A sweep by
-name prefix is the only thing that finds it, which is why this command is filtered by prefix
-rather than counted. No `--stage` filter: a function this module leaves behind exists in both
+per account rather than 20, so it is not what will bite first. Its name carries the bucket's
+random suffix, which means a leak collides with nothing on the next apply: unlike the policies, it
+has no loud failure waiting for it. That is the reason this command is filtered by prefix rather
+than counted, and it is sufficient on its own.
+
+There is no second reason, and in particular the function is **not** untaggable the way the
+policies and the origin access control are — do not extend that argument to it and conclude that
+no tag query in this repository can see one that leaked. A CloudFront function is taggable: AWS's
+machine-readable service reference lists the `function` resource type under `TagResource`,
+`UntagResource` and `ListTagsForResource`, `CreateFunction` takes a `Tags` member, and the AWS
+provider's `aws_cloudfront_function` carries the generic tagging interceptor — which is why
+`bootstrap/oidc.tf`'s `TagSiteCdnResources` statement has to name the function ARN at all. The
+module sets no `tags` argument on it, but that does not make it untagged; it makes it carry the
+caller's `default_tags`, so `Project` and `Env` are on it.
+
+What does **not** follow is the opposite claim. Whether the resource groups tagging API returns a
+CloudFront function has not been measured here — the two-region inventory in 6.2 was taken on
+2026-08-27, before this resource existed, and nothing has re-run it since. So the honest position
+is that the tag barrier is **unproven, not proven**: row 10 may or may not see a leaked function,
+and until somebody re-runs the inventory with one standing, this command is what finds it either
+way.
+
+No `--stage` filter: a function this module leaves behind exists in both
 stages, and a filter is one more way for a sweep to look past the thing it is for.
 
 ### 6.2 What a tag-based assertion can and cannot see
 
 Tags are the obvious way to assert a clean teardown, and on this module they cover **6 of 17
 resources**. Measured, per environment, on 2026-08-27 — before the viewer-request function was
-added, which makes the environment 18 resources and the untagged half larger by one without
-moving either number below:
+added, which makes the environment 18 resources without moving either number below. Which half
+the eighteenth belongs to is not known: the function is taggable and carries `default_tags`, but
+whether the tagging API returns it has not been measured, so it is neither counted as covered nor
+counted as invisible here.
 
 | Query | Resources returned |
 |---|---|
@@ -484,24 +503,67 @@ confirms:
   environment's region returns one resource; five live us-east-1 resources are outside it,
   because CloudFront's logging API must be called in us-east-1 whatever region the environment
   uses. Any teardown assertion has to query both regions.
-- **The four quota-bearing policies, the origin access control and the viewer-request function
-  are invisible in both regions.** `aws_cloudfront_cache_policy`,
-  `aws_cloudfront_response_headers_policy`, `aws_cloudfront_origin_access_control` and
-  `aws_cloudfront_function` expose no tags — the CloudFront API has nowhere to put them, and for
-  the function AWS says so outright: "You can't add tags to edge functions" — and the resource
-  groups tagging API returns only taggable resources. This is not fixable by tagging harder. It
-  is why section 6.1 exists.
+- **The four quota-bearing policies and the origin access control are invisible in both regions.**
+  `aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy` and
+  `aws_cloudfront_origin_access_control` expose no `tags` argument and no `tags_all` attribute —
+  absent from the provider schema, not omitted — and the resource groups tagging API returns only
+  taggable resources. This is not fixable by tagging harder. It is why section 6.1 exists.
+
+- **The viewer-request function does not belong on that list, whatever "You can't add tags to
+  edge functions" suggests.** `aws_cloudfront_function` *is* taggable — see 6.1 — and the
+  module's caller-supplied `default_tags` are on it. Note what that does and does not buy: the
+  measurement above was taken before this resource existed, so it says nothing about whether the
+  tagging API returns a function, and no one has re-run it. The function's position here is
+  **unmeasured**, not "visible" and not "invisible". Section 6.1's prefix sweep is what covers it
+  in the meantime, and it covers it on grounds that do not depend on the answer.
 
 ### 6.3 The account may not be only yours
 
 `aws cloudfront list-distributions` returns everything in the account, and on the account this
 was measured in it returned one distribution belonging to an unrelated project. **Match against
 the module's naming before deleting anything by hand.** The same caution applies in the other
-direction and is worth stating plainly: the CI apply role's CloudFront grants cannot be scoped
-by resource, because CloudFront's create operations accept no resource-level conditions, so in a
-shared account that role can update and delete distributions this repository did not create. In
-an account that hosts anything else, treat a hand-run destroy with a `-target` as the highest-risk
-command in this document.
+direction and is worth stating plainly: in a shared account the CI apply role can update and
+delete distributions this repository did not create. In an account that hosts anything else,
+treat a hand-run destroy with a `-target` as the highest-risk command in this document.
+
+That exposure is deferred, not permanent, and the argument that makes it look permanent is the
+one to refuse: that the apply role's CloudFront grants cannot be scoped by resource because
+CloudFront's create operations accept no resource-level conditions. The premise is true of ten
+actions and reaches no further:
+`CreateDistribution`, `CreateCachePolicy`, `CreateFunction`, `CreateOriginAccessControl` and
+`CreateResponseHeadersPolicy` take no resource type at all in AWS's authorization model, and
+neither do the five account-level `List*` calls — `ListCachePolicies`, `ListDistributions`,
+`ListFunctions`, `ListOriginAccessControls` and `ListResponseHeadersPolicies`. Those ten are the
+whole of it. The conclusion does not follow, because a
+*pre-existing* distribution is never reached through a create. It is reached through
+`DeleteDistribution`, `UpdateDistribution`, `GetDistribution` and `GetDistributionConfig` — all
+four of which take the `distribution` resource type and support `aws:ResourceTag/${TagKey}`.
+Twenty-four of the thirty-four CloudFront actions on the CDN surface take a resource ARN; those
+ten do not. The thirty-four is the CDN surface — `ManageCloudFront`, `ManageSiteFunctions` and
+`TagSiteCdnResources` — rather than every CloudFront action the policy grants: a thirty-fifth,
+`cloudfront:AllowVendedLogDeliveryForResource`, sits further down in
+`ServiceLevelAccessForLogDelivery`. Generalising from the ten to the twenty-four is the error,
+and the `ManageCloudFront` comment in `bootstrap/oidc.tf` says so at the grant itself, with the
+same count and the same scoping of it. Count from that statement rather than from this sentence
+if the two ever disagree: the action lists move, and the numbers move with them.
+
+Part of the surface is already scoped rather than merely scopable. `ManageSiteFunctions` names
+`function/<name_prefix>-site-*` across all five function actions, and `TagSiteCdnResources` names
+the distribution and function ARNs, so the function half of this warning no longer applies: the
+role cannot delete, update or publish a CloudFront function outside this repository's namespace,
+in a shared account or any other. `ManageCertificates` has always been scoped to `certificate/*`.
+What remains account-wide is the distribution half — the four actions above, plus the five
+creates and five enumerations that are account-wide permanently — and
+`docs/CLOUDFRONT_IAM_SCOPING_PLAN.md` carries the backlog that narrows it.
+
+So the warning above stands today, but it stands as a statement about the grant as it is written
+rather than about what CloudFront permits. One thing to know before the condition lands, so it is
+not read as more than it is: `TagSiteCdnResources` grants `cloudfront:TagResource` on
+`distribution/*` unconditioned and cannot be conditioned, because `CreateDistributionWithTags`
+authorises the create and the tag together against a resource that does not exist yet. A foreign
+distribution can therefore be retagged into scope and then deleted, in two calls. A tag condition
+closes the accident this section is actually about — a bad merge, a `-target` typo, a destroy
+pointed at the wrong root — and it is not a boundary against somebody holding the credential.
 
 ### 6.4 One thing this checklist cannot tell you
 

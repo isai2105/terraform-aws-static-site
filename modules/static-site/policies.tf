@@ -33,17 +33,33 @@
 # aws_cloudfront_cache_policy and aws_cloudfront_response_headers_policy expose
 # no `tags` argument and no `tags_all` attribute — not omitted here, absent from
 # the provider schema, because the CloudFront API has nowhere to put them. The
-# origin access control and the viewer-request function in cloudfront.tf are the
-# same, the second of them by an AWS statement rather than by inference: "You
-# can't add tags to edge functions".
+# origin access control in cloudfront.tf is the same.
+#
+# The viewer-request function does *not* belong on that list as a fourth of the
+# same kind, and the AWS sentence that invites putting it there — "You can't add
+# tags to edge functions" — is the reason this is written down rather than left
+# implicit: it is the kind of claim a reader reintroduces. A CloudFront function
+# is taggable — AWS's machine-readable service reference lists the `function`
+# resource type under `TagResource`, `UntagResource` and `ListTagsForResource`,
+# `CreateFunction` takes a `Tags` member, and the provider's
+# `aws_cloudfront_function` carries the generic tagging interceptor, which
+# `bootstrap/oidc.tf`'s `TagSiteCdnResources` statement depends on and argues at
+# length. Why the quoted AWS sentence says otherwise is not worked out here and
+# is deliberately not guessed at; what is established from source is that the
+# resource this module creates is tagged, and that a grant in this repository
+# already has to account for it. cloudfront.tf carries the whole argument beside
+# the resource.
 #
 # That has a consequence which is not local to this file. The end-to-end
 # workflow proves a teardown was complete by asking the resource groups tagging
 # API for every resource carrying this repository's Project and Env tags and
 # asserting the answer is empty — and that API returns only taggable resources.
-# So the four quota-bearing resources this file creates per environment are
-# invisible to that check, permanently and unfixably: a leak here leaves the
-# assertion green.
+# So the four quota-bearing resources *this file* creates per environment — two
+# cache policies and two response headers policies — are invisible to that check,
+# permanently and unfixably: a leak here leaves the assertion green. That count
+# is this file's own and does not extend to the function, whose visibility to
+# that API is unmeasured rather than settled either way; see docs/TEARDOWN.md
+# section 6.1.
 #
 # This is the one place the module's tagging story does not hold, and it is
 # worth being exact about what it costs, because the resources it applies to are

@@ -720,8 +720,9 @@ run "custom_domain_resolves_the_published_site_url" {
 # anywhere else in this repository.
 #
 # Each of them fails at apply, in AWS, against conditions in `bootstrap/oidc.tf`
-# that this repository's own checks cannot see — a name outside the bootstrap's
-# ARN pattern, a `path` that moves the role out of it, a boundary ARN that does
+# that this repository's own checks cannot see — a name outside the exact ARN
+# the bootstrap's grant names, a `path` that moves the role out of it, a
+# boundary ARN that does
 # not match character for character. `terraform validate`, `tflint` and `trivy`
 # are all silent on every one of them. These assertions are the only place a
 # wrong answer costs a red check instead of a half-applied environment.
@@ -743,12 +744,12 @@ run "app_deploy_role" {
 
   assert {
     condition     = aws_iam_role.app_deploy.name == "react-cloudfront-app-deploy-test"
-    error_message = "The deploy role must be named react-cloudfront-app-deploy-<environment>, deliberately breaking this module's name_prefix convention. Both apply roles are granted iam:CreateRole only on role/react-cloudfront-app-deploy-*, so a role named by the convention cannot be created by CI at all — and the trailing wildcard is real, so a wrong suffix is not caught by IAM either. It is caught here."
+    error_message = "The deploy role must be named react-cloudfront-app-deploy-<environment>, deliberately breaking this module's name_prefix convention. Both apply roles are granted iam:CreateRole only on the exact ARN role/react-cloudfront-app-deploy-<environment>, so a role named by the convention cannot be created by CI at all, and neither can one whose suffix is not the environment the bootstrap was given. IAM catches a wrong name too, as an AccessDenied on CreateRole naming an ARN that appears in neither repository; this assertion exists because it is the cheaper of the two signals, failing at plan time on the composition itself, in a run that reaches no AWS account, instead of mid-apply against a half-built environment."
   }
 
   assert {
     condition     = aws_iam_role.app_deploy.path == "/"
-    error_message = "The deploy role must be created at the root path. A role at /app/ has the ARN role/app/react-cloudfront-app-deploy-<env>, which does not match the bootstrap's role/react-cloudfront-app-deploy-* pattern — simulation returns implicitDeny — and the failure is an AccessDenied on CreateRole rather than anything a plan shows."
+    error_message = "The deploy role must be created at the root path. A role at /app/ has the ARN role/app/react-cloudfront-app-deploy-<env>, which is not the exact per-environment ARN the bootstrap's iam:CreateRole grant names, so IAM refuses it — live simulation returns implicitDeny for that path. This assertion exists because the failure would otherwise be an AccessDenied on CreateRole mid-apply rather than anything a plan shows."
   }
 
   assert {

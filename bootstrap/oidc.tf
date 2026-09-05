@@ -174,7 +174,100 @@ locals {
   # The app repository's deploy role, which the static-site module creates and
   # destroys with the environment it grants access to. Named, not wildcarded
   # across IAM: this is the only role either CI identity may touch.
+  #
+  # Repository-wide on purpose, and it has two consumers rather than one. That
+  # distinction is worth writing down, because the one-line summary of the
+  # narrowing below — "the apply roles no longer use this value" — is false, and
+  # believing it is what makes the second consumer easy to break.
+  #
+  # `plan_read`'s `ReadCiIdentity` names this value directly, and is the reason it
+  # must stay a pattern: a pull request plans every environment, so the plan role
+  # has to be able to read every environment's deploy role. The map directly
+  # below is the second consumer, composed *from* this string by `trimsuffix`, so
+  # the apply roles still depend on it transitively — on everything about it
+  # except its final character.
+  #
+  # Do not "tidy" the two back into one, and both consumers are why. Narrowing
+  # this value to a single environment silently breaks cross-environment
+  # planning; deleting it in favour of writing the role name a second time inside
+  # the map duplicates a literal the other repository is held to. The two locals
+  # exist because the two consumers need different endings, not because one of
+  # them is redundant.
+  #
+  # The trailing `*` is a live wildcard rather than a formality, and the evidence
+  # for that is real but must be read for what it now is.
+  # `modules/static-site/iam.tf:93-98` records a `simulate-principal-policy` run
+  # against both apply roles in which `-dev` and `-stage-extra` were allowed too
+  # — and that run was made while the apply roles still granted on this pattern,
+  # which is exactly the grant the map below removed. So it is evidence about the
+  # *pattern's semantics*, not about any grant that stands today: IAM reads the
+  # trailing `*` as a wildcard, and any statement naming this value reaches every
+  # role in the account whose name begins `react-cloudfront-app-deploy-`. The one
+  # statement that still names it, `ReadCiIdentity`, has not itself been
+  # simulated, and no simulation recorded anywhere in this repository covers the
+  # plan role at all. The measurement is the reason the map below exists; the map
+  # is what retired the principals it was measured against.
   app_deploy_role_arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/react-cloudfront-app-deploy-*"
+
+  # The same role, one exact ARN per environment. This is what the two
+  # `apply_identity` statements grant on, and it is the whole of what stops the
+  # stage apply role rewriting prod's deploy role.
+  #
+  # A second local rather than a narrowing of the one above, and that is a
+  # constraint rather than a preference. Narrow `app_deploy_role_arn` in place
+  # and `ReadCiIdentity` narrows with it, so the plan role can read one
+  # environment's deploy role and no other — which breaks cross-environment
+  # planning and does it quietly, because the denial surfaces in a pull request
+  # check rather than in the apply whoever made the change was testing.
+  #
+  # An exact ARN and not a pattern, because the deploy role's name is fully
+  # determined: `modules/static-site/iam.tf:99` composes it as
+  # `${local.app_repository}-deploy-${var.environment}` — no `random_id`, no hex,
+  # nothing AWS mints, unlike the site bucket and the CloudFront function this
+  # file has to reach with prefixes. That is why this narrowing carries none of
+  # the fragility a tag condition would: no propagation window to lose a race
+  # against, no tag another statement could rewrite or remove, and no key that
+  # has to agree across two roots.
+  #
+  # Composed by trimming the wildcard off the pattern above rather than by
+  # writing `react-cloudfront-app-deploy-` a second time. The name is a contract
+  # with the other repository, which `modules/static-site/iam.tf:80-86` states in
+  # those terms and keeps as a single literal for the same reason: two literals
+  # are two chances to change one of them.
+  #
+  # The coupling runs the other way too, and `trimsuffix` is why it needed a
+  # guard rather than a warning sentence. `trimsuffix` fails soft: handed a
+  # pattern that does not end in a bare `*` — a `?` instead, a `/` or a `-`
+  # appended after the wildcard, a suffix added to scope the pattern by path — it
+  # raises nothing at all and returns the string unmodified, so this composes
+  # `…-deploy-*stage`. That is a syntactically valid ARN pattern. It plans, it
+  # applies, it renders into the policy body, and it grants `iam:PutRolePolicy`
+  # over every role whose name ends `stage` rather than over the one role
+  # intended. Nothing anywhere in either root asks a question about it; the whole
+  # of the evidence is a string inside a rendered policy document that nobody
+  # reads unless they already suspect it. `check "app_deploy_role_arn_is_a_pattern"`
+  # below is what turns that into something a plan says out loud.
+  #
+  # A property worth having on purpose rather than a side effect. An entry in
+  # `var.environments` here that disagrees with the `environment` local in the
+  # matching `envs/<env>/main.tf` is now refused at `iam:CreateRole` against an
+  # ARN naming the environment, loudly, in the apply that causes it. Under the
+  # shared pattern the wildcard absorbed that mismatch and it cost nothing until
+  # something else noticed — which, for a coupling that lives in two roots with
+  # nothing mechanical holding it equal, is the failure mode worth converting
+  # into a first-apply error.
+  #
+  # The hazard this shape introduces is a slip rather than a design flaw, and it
+  # is named because it is silent. `local.app_deploy_role_arn` is still in scope
+  # inside `apply_identity`; reaching for it there instead of for this map
+  # re-widens both grants to every environment's deploy role, raises no error at
+  # plan or apply, and leaves no evidence outside the rendered policy JSON. The
+  # two names are deliberately more than one character apart so that a slip has
+  # to be a decision.
+  app_deploy_role_arns_by_environment = {
+    for environment in var.environments :
+    environment => "${trimsuffix(local.app_deploy_role_arn, "*")}${environment}"
+  }
 
   # The permissions boundary that role must carry, composed rather than read
   # back from `aws_iam_policy.app_deploy_boundary.arn`.
@@ -231,12 +324,106 @@ locals {
   # with an `aws:ResourceTag/Project` condition, which this resource type
   # supports; that is deliberately not done here because it would make the grant
   # depend on tag propagation having completed at the instant PutDeliverySource
-  # is called, turning a permission problem into an intermittent one. The
-  # neighbouring CloudFront grant already accepts account-wide scope for the
-  # same operating-model reason it states.
+  # is called, turning a permission problem into an intermittent one. That
+  # reasoning is this local's own and is not borrowed from anywhere: the
+  # `ManageCloudFront` statement below is also account-wide, but for reasons of
+  # its own and neither of them this one — ten of its actions are creates and
+  # account-level enumerations that take no ARN at all, and the rest are on `*`
+  # for a reason that statement gives itself. The two justifications should not
+  # be read as one. Each grant stands on the reason written above it.
   site_distribution_arns = [
     "arn:${data.aws_partition.current.partition}:cloudfront::${data.aws_caller_identity.current.account_id}:distribution/*",
   ]
+
+  # The CloudFront functions the environments create, which — unlike everything
+  # else CloudFront hands this repository — can be scoped by name.
+  #
+  # The difference is entirely in who chooses the identifier. A distribution id,
+  # a cache policy id, a response headers policy id and an origin access control
+  # id are all minted by AWS at create time, so a grant written here has nothing
+  # to name and `*` is the only honest pattern. The function ARN is
+  # `arn:<partition>:cloudfront::<account>:function/<Name>`, and that `Name` is
+  # the caller's: the module sets it to `local.bucket_name`, so every function
+  # this repository creates lands inside the same `<name_prefix>-site-*`
+  # namespace `local.site_bucket_prefix` already exists to keep disjoint from the
+  # state bucket. One naming contract, honoured by the module for the bucket's
+  # sake, turns out to scope a second service at no extra cost.
+  #
+  # The trailing `-*` is not slack that a later edit could tighten. The module
+  # appends a fresh `random_id` on every cycle — the state remembering the last
+  # one is destroyed with the environment — so no exact name is knowable here,
+  # and the same pattern therefore spans every environment's function rather than
+  # one environment's. This is a prefix grant. It separates this repository from
+  # the rest of the account; it does not separate stage from prod, and the
+  # section above is careful about that distinction for the same reason.
+  #
+  # This is also why a name pattern is used here where the tag condition the
+  # apply-role section defers is not — and the comparison is worth making
+  # precisely rather than flatteringly, because this grant is not free of the
+  # failure mode it is being preferred over.
+  #
+  # `var.name_prefix` is already load-bearing and already fails fast: a bootstrap
+  # value that disagrees with what the environments name their buckets is refused
+  # at `s3:CreateBucket` with an AccessDenied naming the bucket, on the first
+  # apply. What scoping the function actions adds is that the same operator error
+  # can now also strand a function. `random_id.bucket_suffix` depends on nothing,
+  # so the bucket and the function are created concurrently rather than in
+  # sequence; `CreateFunction` still succeeds, since it stays on `*`, and the
+  # provider records the id before it publishes — so `PublishFunction` is the
+  # call that is denied, with the function already in AWS *and* in state, and
+  # `DeleteFunction` denied beside it. Before the split below, all three were on
+  # `*` and the same mistake left a function the role could still delete.
+  #
+  # Two properties keep that smaller than what the tag condition would introduce,
+  # and both are about repair rather than about blast radius. The orphan is
+  # transient: correcting `name_prefix` in `bootstrap/terraform.tfvars` and
+  # re-applying the bootstrap restores this role's ability to delete the
+  # function — and that is the same repair the operator already has to make to
+  # get past the bucket denial, so it is one fix rather than two. And the mistake
+  # announces itself in the very apply that causes it, as an AccessDenied naming
+  # the bucket, so it is diagnosable at the moment it happens.
+  #
+  # A wrong `project` has neither property. It produces no error on apply at all.
+  # It surfaces as an AccessDenied on `DeleteDistribution` at destroy, against an
+  # environment that has been standing and serving traffic, in a message that
+  # says nothing about tags and names nothing a reader can trace back to a
+  # tfvars. That is the asymmetry between the two, and it is about which failures
+  # are findable rather than about which are harmless.
+  site_function_arns = [
+    "arn:${data.aws_partition.current.partition}:cloudfront::${data.aws_caller_identity.current.account_id}:function/${local.site_bucket_prefix}-*",
+  ]
+}
+
+# The assertion that keeps `local.app_deploy_role_arns_by_environment` an exact
+# ARN rather than a pattern with a wildcard buried in the middle of it.
+#
+# `trimsuffix` has no failure mode, and that is the problem it is guarding
+# against: given a pattern whose last character is not `*` it returns the pattern
+# unchanged rather than erroring, and the map composes `…-deploy-*stage` — an ARN
+# pattern that is well formed, that Terraform will happily plan and apply, and
+# that hands one environment's apply role `iam:PutRolePolicy` and
+# `iam:UpdateAssumeRolePolicy` over every role in the account whose name happens
+# to end in that environment's name. The narrowing this whole item exists to
+# perform would be undone, and undone invisibly: the only artefact is a string
+# inside a rendered inline policy.
+#
+# A `check` for the reason the boundary ARN below gets one — a hard failure here
+# would be a `lifecycle { postcondition }`, and this file's position is that a
+# drift detector that blocks an apply also blocks the apply that repairs it. The
+# honest cost is the same: a check assertion is a warning, never an error, so it
+# reports rather than stops, and a warning in a long plan is easy to miss.
+#
+# One thing it does better than its neighbour, though, and it is the reason this
+# is worth having at all. The condition depends on nothing but literals, the
+# account id and the partition, so it is fully known at plan time on every run
+# including the very first — it is never deferred with a "known after apply" note
+# and never skipped. Whoever makes this edit sees the warning in the plan that
+# introduces it, not in the one after the damage is applied.
+check "app_deploy_role_arn_is_a_pattern" {
+  assert {
+    condition     = endswith(local.app_deploy_role_arn, "*")
+    error_message = "local.app_deploy_role_arn no longer ends in a bare `*`. `local.app_deploy_role_arns_by_environment` composes each exact role ARN by trimming that `*` off with `trimsuffix`, and `trimsuffix` does not fail on a suffix that is not there — it returns the pattern unchanged, so the map is now composing an ARN with a wildcard in the middle of it (`…-deploy-*<env>`). Nothing downstream will refuse that: the apply roles' `ManageAppDeployRoleBounded` and `ManageAppDeployRoleUnbounded` will render, plan and apply against it, granting each environment's apply role iam:PutRolePolicy and iam:UpdateAssumeRolePolicy over every role in the account whose name ends in that environment's name. Either restore the trailing `*` or stop composing the map from this value."
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -547,43 +734,157 @@ resource "aws_iam_role_policy" "plan_state" {
 # What splitting this role per environment buys, and — the part worth more —
 # what it does not.
 #
-# It isolates **state**, and only state. Each role below can read and write one
-# environment's `terraform.tfstate` and the `.tflock` beside it, and no other.
-# The other two policies are attached to every one of these roles unchanged, and
-# each carries cross-environment reach that the split leaves exactly where it
-# was:
+# It isolates **state**, and the app repository's deploy role. Each role below
+# can read and write one environment's `terraform.tfstate` and the `.tflock`
+# beside it and no other, and can create, rewrite and delete one environment's
+# `react-cloudfront-app-deploy-<env>` role and no other.
+#
+# It is more than state, but not by much, and "state, and only state" is the
+# shorthand to resist. `apply_infrastructure` is the one policy attached to every
+# one of these roles unchanged. The two bullets are where each of the other two
+# policies stands — the first a cross-environment reach the split leaves exactly
+# where it was, the second one it no longer has and the residual that outlived
+# closing it:
 #
 #   - `apply_infrastructure` still holds `cloudfront:DeleteDistribution`, so the
 #     stage role, handed prod's distribution id, will delete prod's
-#     distribution. CloudFront accepts no resource-level condition on those
-#     calls at all — that policy says so at length, and no arrangement of roles
-#     here changes it.
-#   - `apply_identity` still grants `iam:CreateRole`, `iam:PutRolePolicy` and
-#     `iam:UpdateAssumeRolePolicy` on `role/react-cloudfront-app-deploy-*`,
-#     which is one pattern spanning every environment rather than one grant per
-#     role. So the stage role can rewrite prod's app deploy role — its trust
-#     policy and its inline policy both. The reach is real and it predates this
-#     split rather than being introduced by it.
+#     distribution. That reach is account-wide because this file declines to
+#     condition it, not because CloudFront refuses to be conditioned:
+#     `DeleteDistribution` and `UpdateDistribution` both take the `distribution`
+#     resource type and both support `aws:ResourceTag/${TagKey}`, so the control
+#     exists and is being deferred rather than being unavailable.
 #
-#     `DenyRoleChaining` does not cap it, though it reads as though it should:
+#     What defers it is where the two halves of the comparison live. The
+#     condition would have to be `aws:ResourceTag/Project`, written from
+#     `var.project` in `bootstrap/terraform.tfvars`, and matched against a tag
+#     whose value comes from `project` in `envs/*/terraform.tfvars` — two files,
+#     in two roots, with nothing mechanical holding them equal, because this
+#     root deliberately exposes no `terraform_remote_state` for the environments
+#     to read. A mismatch between those two strings is already the documented
+#     quiet footgun for a cloner. Conditioning the delete on it would turn that
+#     mismatch into a denied `DeleteDistribution` at destroy time, stranding the
+#     distribution and the bucket behind it — precisely the failure class the
+#     teardown documentation exists to prevent, and a worse outcome than the
+#     cross-environment reach the condition would have closed. So it waits on a
+#     written must-match contract between the two roots, and no arrangement of
+#     roles here closes it in the meantime.
+#   - `apply_identity` used to belong in this list and no longer does, and the
+#     shape of what it used to be is worth keeping rather than deleting, because
+#     it is the reach a reader would otherwise assume is still here. It granted
+#     `iam:CreateRole`, `iam:PutRolePolicy` and `iam:UpdateAssumeRolePolicy` on
+#     `role/react-cloudfront-app-deploy-*` — one pattern spanning every
+#     environment rather than one grant per role — so the stage role could
+#     rewrite prod's app deploy role, its trust policy and its inline policy
+#     both, and inherit whatever that role held. The wildcard was confirmed live
+#     rather than assumed: `modules/static-site/iam.tf:93-98` records a
+#     `simulate-principal-policy` run in which `-dev` and `-stage-extra` were
+#     allowed too.
+#
+#     That document is now rendered per environment and names the exact ARN
+#     `role/react-cloudfront-app-deploy-<env>`
+#     (`local.app_deploy_role_arns_by_environment`), so the grant reaches one
+#     role.
+#
+#     Be exact about what that bought, because the reading it invites — the stage
+#     apply role can no longer reach prod — is wrong, and a control credited with
+#     more than it does is worse than no control, since the next reader stops
+#     looking. The permissions boundary is a single policy shared by both
+#     environments. A stage apply role that can no longer rewrite *prod's* deploy
+#     role can still rewrite *stage's own*, install the same access on prod's
+#     bucket under that same shared ceiling, retrust it to a subject it controls,
+#     and arrive at an identical capability set. The narrowing moved the vehicle;
+#     it did not narrow the destination.
+#
+#     What it does close is real, and it is smaller than the change looks:
+#       - `iam:DeleteRole` against prod's deploy role. That is not an escalation
+#         — which is why the unbounded half was able to hold it in the first
+#         place — it is an availability break in the *other* repository: the
+#         identity prod's deploys assume, deleted mid-cycle, as easily by a
+#         mistyped matrix as on purpose, with nothing in this root positioned to
+#         notice and no repair available in that root.
+#       - `iam:PutRolePolicy`, `iam:UpdateAssumeRolePolicy` and `iam:UpdateRole`
+#         against prod's deploy role. The *reach* those bought is redundant now,
+#         for the reason the paragraph above gives, but the *name* is not: this
+#         was the only route to a durable credential actually called
+#         `react-cloudfront-app-deploy-prod`. Everything reachable the other way
+#         carries stage's name in every CloudTrail record and every
+#         `GetCallerIdentity`, and the difference between an escalation that hides
+#         inside the expected traffic of prod's deploy and one that stands out in
+#         it is most of what detection has to work with here.
+#       - a genuinely new fail-fast, set out in full beside the map: an entry in
+#         `var.environments` that disagrees with the `environment` local in the
+#         matching `envs/<env>/main.tf` is now refused at `iam:CreateRole` against
+#         an ARN naming the environment, where the shared wildcard used to absorb
+#         it silently.
+#
+#     It was still the right item to take first, for a reason about ordering
+#     rather than about size: it was the unblocked one. It needed no written
+#     contract between two roots, no assumption about tag propagation, and no new
+#     policy per environment — unlike the `aws:ResourceTag/Project` condition
+#     above, which waits on that contract, and unlike per-environment site bucket
+#     ARNs, which is where the largest reduction in stage-to-prod reach actually
+#     lives and which the paragraphs below spend their length on. An exact role
+#     ARN is also the better instrument on its own terms: it admits no retagging
+#     into scope and needs no assumption about when AWS makes a tag readable to an
+#     authorization decision, neither of which a tag condition on
+#     `DeleteDistribution` can say.
+#
+#     Be precise about what that closed, because a neighbouring escalation
+#     survives it intact. `DenyRoleChaining` was never the cap and still is not:
 #     that deny binds this identity, while the assume at the end of such an
 #     escalation is performed by GitHub against the rewritten trust policy — a
-#     different principal entirely. What caps it is the permissions boundary the
-#     conditioned half of `apply_identity` requires, which holds prod's deploy
-#     role to three services whoever rewrote it.
+#     different principal entirely. The cap on what a rewritten deploy role may
+#     hold is the permissions boundary the conditioned half of `apply_identity`
+#     requires.
 #
-#     Read that cap precisely. The boundary is one policy shared by every
-#     environment, and its resources are `<prefix>-site-*` and `distribution/*`
-#     — both environments by construction, and in the CloudFront case every
-#     distribution in the account. So the residual is not nothing: it is
-#     object-level write, delete included, on the production site bucket, plus
-#     invalidation of any distribution. What the boundary removes is the
-#     conversion of that reach into a durable identity; it buys no environment
-#     isolation, and per-environment boundaries are not available without one
-#     policy per environment and a condition per role.
+#     Read that cap precisely, because it is now the whole of the residual rather
+#     than a backstop behind a wildcard. The boundary is one policy shared by
+#     every environment — deliberately, which is why
+#     `local.app_deploy_boundary_arn` was not narrowed alongside the role ARN —
+#     and its resources are `<prefix>-site-*` and `distribution/*`: both
+#     environments by construction, and in the CloudFront case every distribution
+#     in the account.
+#
+#     Before walking that escalation, note the shorter route, because this
+#     passage is the file's answer to "what can the stage apply role still do to
+#     prod" and answering it with an escalation would overstate the work an
+#     attacker has to do. `apply_infrastructure`'s `ManageSiteBuckets` grants
+#     `s3:*` on `local.site_bucket_arns`, and that local is the pair
+#     `<prefix>-site-*` and `<prefix>-site-*/*` — the bucket form and the object
+#     form, with no environment in either, rendered identically onto every apply
+#     role. The stage apply role therefore holds every S3 action there is on the
+#     production site bucket and on its contents, directly, under its own
+#     credential, with no IAM call in front of it. Not object write and delete:
+#     `s3:DeleteBucket`, `s3:PutBucketPolicy`, `s3:PutBucketPublicAccessBlock`,
+#     `s3:PutBucketVersioning` and the rest of the bucket surface as well — which
+#     is strictly *more* than the boundary permits a deploy role, since the
+#     boundary caps that at `s3:*Object*` plus listing and denies the bucket-level
+#     access controls outright in `DenyContentAccessControl`. Scoping the site
+#     bucket ARNs per environment is the item that closes this, and it is not this
+#     one.
+#
+#     The escalation survives on top of that and is still worth stating, because
+#     it reaches two things the direct grant does not. The stage role can write an
+#     inline policy onto *stage's own* deploy role carrying the boundary's whole
+#     ceiling against the production site bucket, plus `CreateInvalidation` on any
+#     distribution in the account, and rewrite that role's trust policy to name a
+#     subject it controls — a credential that outlives the job and answers to none
+#     of the OIDC conditions this file spends its length on. For data reach on
+#     prod's bucket it is redundant with the paragraph above; what it adds is
+#     durability and CloudFront. Naming the exact role ARN moved the escalation
+#     from prod's deploy role to stage's; it did not narrow what the role at the
+#     end of it can reach. What the boundary removes is `iam:` and `sts:` — the
+#     conversion of that reach into a durable *second* identity, as distinct from
+#     a retrusted first one, which the apply role's own
+#     `iam:UpdateAssumeRolePolicy` still supplies — and per-environment boundaries
+#     are not available without one policy per environment and a condition per
+#     role.
 #
 # A deliberate raw-API call against a known identifier is therefore exactly as
-# possible as it was before this split, through either of those two policies.
+# possible as it was before this split, through `apply_infrastructure` — most
+# directly through `ManageSiteBuckets`, which names no environment, and
+# additionally, by the route in the second bullet, through the environment's own
+# deploy role under a boundary that spans every environment.
 #
 # What the split closes is the *accident* class: a mistyped `key=`, a matrix
 # that expands to the wrong name, a scheduled workflow that drifts onto the
@@ -661,9 +962,10 @@ resource "aws_iam_role" "apply" {
   # distribution half-removed and the state lock held — the failure walked in
   # docs/TEARDOWN.md section 5.
   #
-  # The number is headroom, not a measurement. An earlier version of this
-  # comment justified it with a 15-to-20 minute CloudFront teardown, which was
-  # inherited rather than observed: measured on 2026-08-27 across three
+  # The number is headroom, not a measurement, and in particular it is not
+  # derived from the 15-to-20 minute CloudFront teardown figure that circulates
+  # unsourced — that figure is inherited rather than observed. Measured on
+  # 2026-08-27 across three
   # distributions, a distribution tears down in about three minutes and a
   # whole 17-resource environment in about the same, so this ceiling is
   # roughly forty times what a destroy needs. It stays at two hours, because the
@@ -879,15 +1181,84 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # policies, the two response headers policies, and the viewer-request
   # function.
   #
-  # Enumerated rather than wildcarded, because here the resource cannot be
-  # narrowed and the actions can. CloudFront's create operations do not support
-  # resource-level conditions at all, so this role can create these resource
-  # types anywhere in the account — which is acceptable only because the
-  # operating model gives this repository its own account, and which the
-  # README's tradeoffs section says out loud. What the enumeration does buy is
+  # Enumerated rather than wildcarded, and split across the three statements
+  # here rather than written as one, because "the resource cannot be narrowed"
+  # is true of only part of this surface. Do not read it as a property of the
+  # whole of it; the split is what keeps the two parts distinguishable.
+  #
+  # Ten of the thirty-four CloudFront actions in these three statements
+  # authorise against `*` and nothing else, per AWS's machine-readable service
+  # reference — thirty-four being this CDN surface rather than everything the
+  # role holds, since `ServiceLevelAccessForLogDelivery` further down grants a
+  # thirty-fifth. They are the five
+  # creates — CreateCachePolicy, CreateDistribution, CreateFunction,
+  # CreateOriginAccessControl, CreateResponseHeadersPolicy — which have no ARN
+  # to name because they are the calls that mint one, and the five account-level
+  # enumerations — ListCachePolicies, ListDistributions, ListFunctions,
+  # ListOriginAccessControls, ListResponseHeadersPolicies. Those are why this
+  # statement is `*`, and they mean this role can create these resource types
+  # anywhere in the account: acceptable only because the operating model gives
+  # this repository its own account, which the README's tradeoffs section says
+  # out loud. The other twenty-four do take a resource ARN, and where naming
+  # one subtracts anything it is named — the five `function` actions and the
+  # three multi-type tag actions are in their own statements directly below.
+  #
+  # The twelve remaining cache-policy, response-headers-policy and
+  # origin-access-control actions — the deletes, gets, config-gets and updates,
+  # once each family's create and list are counted among the ten above — stay
+  # here deliberately, and the reason is written down so a later reader does not
+  # "fix" it: each of those action names already determines its
+  # one resource type — `GetCachePolicy` cannot be authorised against anything
+  # but a cache policy — so `Resource: "*"` and `Resource: "cache-policy/*"`
+  # admit and refuse exactly the same set of requests. Scoping them buys no
+  # access control whatsoever and spends characters against the
+  # 10,240-character aggregate inline-policy cap this file documents at the
+  # bottom. The same argument keeps the four distribution-typed actions here —
+  # `DeleteDistribution`, `UpdateDistribution`, `GetDistribution` and
+  # `GetDistributionConfig`: until the `aws:ResourceTag/Project` condition the
+  # apply-role section above defers is actually written, `distribution/*` is
+  # another spelling of `*`.
+  #
+  # What the enumeration itself buys — and no ARN scoping would have bought — is
   # excluding the CloudFront surface this repository has no use for: key groups,
   # public keys, streaming distributions, realtime log configs, WAF
   # associations, and the account-level settings.
+  #
+  # Three invalidation actions are deliberately absent, and their absence is the
+  # thing most likely to be read as an oversight here, so it is written down.
+  # `cloudfront:CreateInvalidation`, `cloudfront:GetInvalidation` and
+  # `cloudfront:ListInvalidations` used to sit in the list below and were removed
+  # because nothing in this repository ever called them with this role. There is
+  # no `aws_cloudfront_invalidation` resource in the AWS provider, this module
+  # declares nothing that invalidates, and no workflow here shells out to
+  # `aws cloudfront`. A permission granted against a call that is never made is
+  # not spare capacity; it is reach nobody is watching.
+  #
+  # The apparent contradiction, and the reason it is not one. This role *does*
+  # write an invalidation grant on every apply: `modules/static-site/iam.tf`'s
+  # `InvalidateDistribution` statement grants `cloudfront:CreateInvalidation` and
+  # `cloudfront:GetInvalidation` to the app repository's deploy role, and this
+  # role installs it with `iam:PutRolePolicy`. That is allowed, and it is allowed
+  # by design rather than by an accident of the boundary: **IAM does not require
+  # a principal to hold a permission in order to grant it.** There is no
+  # `iam:PassRole`-style coupling between writing a policy and holding what it
+  # says. What constrains the deploy role is the permissions boundary the
+  # conditioned half of `apply_identity` insists on, not the granting role's own
+  # grants. Without that sentence sitting here, the first reader to notice that
+  # this file hands out an invalidation permission it does not itself hold will
+  # restore these three actions and undo the subtraction.
+  #
+  # If invalidation ever moves out of the app repository and into these
+  # workflows, the actions come back — but not to this statement. Copy the shape
+  # of `InvalidateDistribution` in `modules/static-site/iam.tf` instead: it pins
+  # both actions to the exact distribution ARN, because that module knows the id
+  # at the moment it writes the policy, which is the one place in this system
+  # where that is true. Re-adding them here would put them back on `*`, which is
+  # the shape this deletion exists to remove. Note also that
+  # `InvalidateDistribution` carries `GetInvalidation` alongside
+  # `CreateInvalidation` for a stated reason — the deploy's
+  # `aws cloudfront wait invalidation-completed` polls it — so a copy that takes
+  # only the create fails after the upload has already landed.
   statement {
     sid    = "ManageCloudFront"
     effect = "Allow"
@@ -896,21 +1267,16 @@ data "aws_iam_policy_document" "apply_infrastructure" {
       "cloudfront:CreateCachePolicy",
       "cloudfront:CreateDistribution",
       "cloudfront:CreateFunction",
-      "cloudfront:CreateInvalidation",
       "cloudfront:CreateOriginAccessControl",
       "cloudfront:CreateResponseHeadersPolicy",
       "cloudfront:DeleteCachePolicy",
       "cloudfront:DeleteDistribution",
-      "cloudfront:DeleteFunction",
       "cloudfront:DeleteOriginAccessControl",
       "cloudfront:DeleteResponseHeadersPolicy",
-      "cloudfront:DescribeFunction",
       "cloudfront:GetCachePolicy",
       "cloudfront:GetCachePolicyConfig",
       "cloudfront:GetDistribution",
       "cloudfront:GetDistributionConfig",
-      "cloudfront:GetFunction",
-      "cloudfront:GetInvalidation",
       "cloudfront:GetOriginAccessControl",
       "cloudfront:GetOriginAccessControlConfig",
       "cloudfront:GetResponseHeadersPolicy",
@@ -918,21 +1284,123 @@ data "aws_iam_policy_document" "apply_infrastructure" {
       "cloudfront:ListCachePolicies",
       "cloudfront:ListDistributions",
       "cloudfront:ListFunctions",
-      "cloudfront:ListInvalidations",
       "cloudfront:ListOriginAccessControls",
       "cloudfront:ListResponseHeadersPolicies",
-      "cloudfront:ListTagsForResource",
-      "cloudfront:PublishFunction",
-      "cloudfront:TagResource",
-      "cloudfront:UntagResource",
       "cloudfront:UpdateCachePolicy",
       "cloudfront:UpdateDistribution",
-      "cloudfront:UpdateFunction",
       "cloudfront:UpdateOriginAccessControl",
       "cloudfront:UpdateResponseHeadersPolicy",
     ]
 
     resources = ["*"]
+  }
+
+  # The five `function` actions that take an ARN, held to the namespace this
+  # repository names its functions in.
+  #
+  # `cloudfront:CreateFunction` is deliberately not among them and stays in the
+  # statement above: it is one of the ten actions that authorise against `*`
+  # only, so naming an ARN for it would match no request and deny every one —
+  # the same trap the ACM split further down was written to avoid, in a service
+  # where the mistake is even quieter because a plan never calls it.
+  #
+  # What this subtracts is real rather than cosmetic, which is what distinguishes
+  # it from the cache-policy and OAC actions left above. `function/*` would have
+  # been another spelling of `*`, but `function/<name_prefix>-site-*` is not:
+  # a CloudFront function is account-scoped, functions created by anything else
+  # in this account are outside the pattern, and this role can therefore no
+  # longer read, republish, rewrite or delete one that does not belong to this
+  # repository. The pattern is `local.site_function_arns`, whose comment carries
+  # why a name pattern is trustworthy here where a tag condition is not.
+  statement {
+    sid    = "ManageSiteFunctions"
+    effect = "Allow"
+
+    actions = [
+      "cloudfront:DeleteFunction",
+      "cloudfront:DescribeFunction",
+      "cloudfront:GetFunction",
+      "cloudfront:PublishFunction",
+      "cloudfront:UpdateFunction",
+    ]
+
+    resources = local.site_function_arns
+  }
+
+  # The three tag actions, which are the only actions in these three statements
+  # that reach more than one CloudFront resource type — and therefore the only
+  # ones where naming ARNs removes something a `*` would have allowed.
+  #
+  # `TagResource` and `UntagResource` reach ten types on `*`;
+  # `ListTagsForResource` reaches nine, the missing one being streaming
+  # distributions, which cannot be listed this way. Past the distribution and the
+  # function this repository actually creates, that is: streaming distributions
+  # (the two writes only), key value stores, VPC origins, trust stores, anycast
+  # IP lists, connection groups, connection functions and distribution tenants.
+  # This repository creates none of them and has no use for any of them, so
+  # naming the two types it does create is what takes them away.
+  #
+  # ---------------------------------------------------------------------------
+  # `local.site_function_arns` is load-bearing on every run of every
+  # environment. Do not remove it.
+  # ---------------------------------------------------------------------------
+  #
+  # A CloudFront function is taggable — AWS's machine-readable service reference
+  # lists the `function` resource type under all three of these actions, and
+  # `CreateFunction` takes a `Tags` member — and the AWS provider tags it
+  # transparently. `aws_cloudfront_function` carries the provider's
+  # `@Tags(identifierAttribute="arn")` annotation, which wires the generic
+  # tagging interceptor onto the resource, and the generated `listTags()` behind
+  # that interceptor calls `cloudfront:ListTagsForResource` against the function
+  # ARN on every *read* of it. Not only when a tag changes: on every refresh,
+  # every plan against existing state, every apply and every destroy. Strike this
+  # ARN out of the list and the next run of any environment fails on a read,
+  # before it reaches anything it meant to change.
+  #
+  # Scoping this statement is what makes that dependency explicit — on `*` in
+  # `ManageCloudFront` nobody had to know it existed — and it is written down
+  # because the obvious tidy-up, "a function is untaggable, drop the second
+  # pattern", is both wrong and silent in review. Nor is this a forward-looking
+  # allowance: function tagging landed in AWS provider 6.49.0, thirteen minor
+  # releases below the 6.62.0 this repository pins.
+  #
+  # ---------------------------------------------------------------------------
+  # This statement carries no condition, and in particular no `aws:ResourceTag`.
+  # That is not an omission. Do not add one.
+  # ---------------------------------------------------------------------------
+  #
+  # The AWS provider does not create a distribution and then tag it in a second
+  # call. It calls CreateDistributionWithTags — one API call, authorised against
+  # `cloudfront:CreateDistribution` and `cloudfront:TagResource` together,
+  # against a distribution that does not exist yet. A resource-tag condition
+  # here would be evaluated against a resource with no tags to read, and in fact
+  # with no resource at all; `StringEquals` on an absent key does not match, so
+  # TagResource is refused and the create fails with it. The ARN pattern is not
+  # the problem — `distribution/*` matches the distribution being created
+  # perfectly well. It is the condition specifically that breaks it, which is
+  # exactly the shape of mistake that reads as a tightening in review.
+  #
+  # Nothing in this repository would catch it. `validate.yml` runs without AWS
+  # credentials and never calls CreateDistribution, so fmt, validate, lint, scan
+  # and the module's plan tests all stay green; the failure surfaces on a real
+  # apply, in whichever environment somebody deploys first after the edit, after
+  # the bootstrap has already been hand-applied. This comment is the only
+  # warning a future editor gets, which is why it is here rather than in a commit
+  # message.
+  statement {
+    sid    = "TagSiteCdnResources"
+    effect = "Allow"
+
+    actions = [
+      "cloudfront:ListTagsForResource",
+      "cloudfront:TagResource",
+      "cloudfront:UntagResource",
+    ]
+
+    resources = concat(
+      local.site_distribution_arns,
+      local.site_function_arns,
+    )
   }
 
   # The optional custom-domain path: a certificate in us-east-1 and the DNS
@@ -1587,7 +2055,27 @@ check "app_deploy_boundary_arn_matches" {
 # by hand, converting a containment problem into a stranded orphan — the failure
 # class docs/TEARDOWN.md exists to prevent. Deleting a role is not an escalation,
 # so the trade goes the other way here.
+#
+# Rendered once per environment, and that `for_each` is doing the whole of the
+# work that turns the two grants below from a namespace grant into a role grant.
+# Both name `local.app_deploy_role_arns_by_environment[each.key]` — the exact ARN
+# of the one deploy role this environment's apply role has any business
+# touching — where they used to name `role/react-cloudfront-app-deploy-*`, under
+# which the stage apply role could rewrite prod's deploy role outright. The
+# apply-role section above walks that reach, why closing it came before the
+# CloudFront scoping this file still defers, and — the part not to skip — the
+# neighbouring escalation the change does *not* close.
+#
+# `local.app_deploy_boundary_arn` is deliberately not per-environment beside it.
+# One boundary policy, shared, named both by the condition on the bounded half
+# and by `DenyBoundaryPolicyEdit`, and `aws_iam_policy.app_deploy_boundary` is a
+# single resource rather than one per environment. Splitting it would take a
+# policy per environment and a condition per role, for a ceiling that is
+# identical in every one of them; the price of not splitting it is the residual
+# the section above states in full.
 data "aws_iam_policy_document" "apply_identity" {
+  for_each = toset(var.environments)
+
   # The half that can bring a role into existence or change what it may do.
   # Every action here is refused unless the role carries the boundary.
   statement {
@@ -1620,7 +2108,12 @@ data "aws_iam_policy_document" "apply_identity" {
     # condition below, this single action reaches AdministratorAccess without a
     # line of policy JSON being written — which is why it belongs in this half
     # rather than among the reads.
-    resources = [local.app_deploy_role_arn]
+    #
+    # One exact role ARN, not the `app_deploy_role_arn` pattern still in scope
+    # here. Substituting the pattern back in raises no error at plan or apply and
+    # hands this environment's apply role `iam:UpdateAssumeRolePolicy` over every
+    # other environment's deploy role.
+    resources = [local.app_deploy_role_arns_by_environment[each.key]]
 
     condition {
       test     = "StringEquals"
@@ -1660,7 +2153,15 @@ data "aws_iam_policy_document" "apply_identity" {
       "iam:UntagRole",
     ]
 
-    resources = [local.app_deploy_role_arn]
+    # The same exact ARN as the bounded half above, and it matters more here than
+    # it looks. This is the half the `iam:PermissionsBoundary` condition cannot
+    # cover, so the resource is the *only* thing narrowing it: under the old
+    # pattern, `iam:DeleteRole` in this list reached every environment's deploy
+    # role with no condition anywhere in the way, and deleting prod's deploy role
+    # mid-cycle is a broken deploy in the other repository rather than an
+    # escalation — quieter than the escalation above and easier to do by
+    # accident.
+    resources = [local.app_deploy_role_arns_by_environment[each.key]]
   }
 
   # The module resolves the provider ARN through a data source rather than
@@ -1749,10 +2250,21 @@ data "aws_iam_policy_document" "apply_identity" {
 # one, and that surfaces as an AccessDenied on a state key part-way through a
 # destroy.
 #
-# `apply_identity` and `apply_infrastructure` allow no such choice: they carry
-# no per-environment divergence to make one about, so a mirror of either is
-# current or it is wrong. Edit either document and re-sync every mirror of it in
-# the same change, not a follow-up one. A mirror that has fallen behind does not
+# `apply_infrastructure` allows no such choice: it carries no per-environment
+# divergence to make one about, so a mirror of it is current or it is wrong.
+#
+# `apply_identity` used to be in that sentence and is not any more, which is the
+# kind of change a mirror maintainer will not notice until it costs them. It is
+# rendered per environment now, naming one exact app deploy role ARN in each
+# copy, so it has the same property `apply_state` has: a mirror copied from one
+# environment's rendering is silently wrong for every other. It would create and
+# delete stage's deploy role and no other, and that surfaces as an AccessDenied
+# on `iam:CreateRole` part-way through an apply of prod, quoting an ARN the
+# mirror does not mention anywhere. Mirror one per environment, or take the union
+# of the role ARNs as a deliberate choice.
+#
+# Edit any of these documents and re-sync every mirror of it in the same change,
+# not a follow-up one. A mirror that has fallen behind does not
 # fail at plan time — it fails part-way through a destroy, after the inline
 # policy is already gone, leaving the stripped role the teardown checklist
 # exists to prevent. Such an identity is created outside this repository and no
@@ -1778,10 +2290,16 @@ resource "aws_iam_role_policy" "apply_infrastructure" {
   policy = data.aws_iam_policy_document.apply_infrastructure.json
 }
 
+# Per environment, unlike the one above: `apply_identity` names the exact ARN of
+# this environment's app deploy role, so there is one rendered document per
+# environment to index into rather than one document attached N times. It is
+# still a single `data` block, so the argument the comment above makes about not
+# letting a shared document drift into N hand-maintained copies is satisfied here
+# too — `for_each` is what keeps both properties at once.
 resource "aws_iam_role_policy" "apply_identity" {
   for_each = aws_iam_role.apply
 
   name   = "identity"
   role   = each.value.id
-  policy = data.aws_iam_policy_document.apply_identity.json
+  policy = data.aws_iam_policy_document.apply_identity[each.key].json
 }

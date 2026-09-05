@@ -67,13 +67,23 @@ than where it was written:
 
 - **The name.** `react-cloudfront-app-deploy-<env>`, not `<name_prefix>-…`, which is the naming
   convention every other resource in the module follows. `bootstrap/oidc.tf` grants CI
-  `iam:CreateRole` only on `role/react-cloudfront-app-deploy-*`, so a role named anything else
-  cannot be created at all. Because the role is destroyed and recreated on every cycle, its ARN
-  is stable only because its *name* is — which makes the name part of this contract. Renaming
-  it is a breaking change in the app repository, not a refactor in this one.
+  `iam:CreateRole` only on the exact ARN `role/react-cloudfront-app-deploy-<env>`, so a role
+  named anything else cannot be created at all. Because the role is destroyed and recreated on
+  every cycle, its ARN is stable only because its *name* is — which makes the name part of this
+  contract. Renaming it is a breaking change in the app repository, not a refactor in this one.
+
+  The `<env>` suffix is enforced by IAM, not merely by convention, and reading it as a prefix
+  grant with a free-form tail is the mistake to avoid. `ManageAppDeployRoleBounded` and
+  `ManageAppDeployRoleUnbounded` are rendered once per environment against one exact ARN each, so
+  the whole name is enforced: an `<env>` the infrastructure repository's bootstrap does not list
+  is refused at `iam:CreateRole` during that repository's own apply, before this contract is
+  reachable at all. The failure lands on the side that can fix it — but it also means the set of
+  valid `<env>` values is fixed by the bootstrap's `environments` list rather than by whatever
+  the module was applied with.
 - **The path.** There is none: the ARN is `role/react-cloudfront-app-deploy-<env>`, never
-  `role/app/react-cloudfront-app-deploy-<env>`. A path segment would put the ARN outside the
-  bootstrap's `iam:CreateRole` pattern, and simulation returns `implicitDeny` for it.
+  `role/app/react-cloudfront-app-deploy-<env>`. A path segment would put the ARN outside the ARN
+  the bootstrap's `iam:CreateRole` grant names — simulation returns `implicitDeny` for a pathed
+  role, and the exact per-environment ARN refuses it for the same reason and more narrowly.
 - **The permissions boundary.** Mandatory. CI's `iam:CreateRole` is conditioned on it. What that
   means for the app repository is section 7.
 
