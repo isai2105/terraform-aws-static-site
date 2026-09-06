@@ -1274,48 +1274,52 @@ data "aws_iam_policy_document" "apply_state" {
   }
 }
 
-# The half of the apply roles' infrastructure grants that names no environment.
+
+# What apply may do to the infrastructure the environments actually describe,
+# for one environment.
 #
-# Nine statements, and the thing they have in common is not that they are safe —
-# some of them are the widest grants in this file — but that they are *identical
-# in every environment's rendering*. Every one of them is either an action that
-# authorises against `*` and nothing else, or an account-level enumeration, or a
-# resource type this repository does not name per environment. There is no
-# `each.key` anywhere below, and nothing that could take one.
+# Derived service by service from what this repository creates, rather than from
+# a managed policy that happens to cover it. Everything absent is absent on
+# purpose: there is no EC2, no VPC, no RDS, no Lambda and no KMS here, and the
+# day one of those is added this policy should be the thing that says so.
 #
-# A customer-managed policy rather than a fourth inline policy, and the reason is
-# arithmetic rather than taste. IAM caps the *aggregate* size of one role's
-# inline policies at 10,240 characters. Conditioning the distribution actions and
-# scoping the per-environment grants took the three inline policies to 11,146
-# characters on the stage role — over the cap, so `iam:PutRolePolicy` would have
-# failed the apply outright. The note at the bottom of this file already named
-# the escape: "moving to a managed policy is the escape, at the cost of the
-# property in the first sentence — and it would cost it once per environment now
-# rather than once."
+# Rendered once per environment, and every grant that *can* name one does: the
+# site bucket and its objects, the contract parameter path, the access log groups
+# and the CloudFront function by ARN, and the distribution create, the four
+# distribution actions and the certificate delete by an `aws:RequestTag/Name` or
+# `aws:ResourceTag/Name` condition. What is left on `*` is left there because the
+# action refuses a resource or a condition — the ten CloudFront actions that
+# authorise against nothing else, the twelve whose resource types carry no tag,
+# the account-level enumerations, the log-delivery APIs — and not because nobody
+# looked. Each of those says so where it sits.
 #
-# Taking that escape here rather than for a per-environment policy is what keeps
-# the cost at "once". One policy exists, both apply roles attach it, and what
-# leaves the inline budget is the 3,456 characters that were being rendered into
-# both roles anyway. Measured after the split: 7,740 of 10,240 inline on the
-# stage role, and 3,456 of a managed policy's own 6,144.
-#
-# What it costs, stated plainly because the note below argues the other way. An
-# inline policy has exactly the lifetime of the role it sits on, so a destroy
-# cannot strand it; a managed policy is a separate object that outlives every
-# role it is attached to. This one is created and destroyed by this root, and
-# `aws_iam_role_policy_attachment` sequences the detach before the role goes, so
-# a `terraform destroy` of the bootstrap removes it. What is genuinely lost is
-# the property that *no* sequence of partial failures can leave it behind:
-# `aws_iam_policy.app_deploy_boundary` already accepts that trade, for its own
-# reasons, and this is the second object in the file to do so. The teardown
-# checklist is where an orphan of this shape would be caught.
-#
-# Do not add a statement here that could name an environment. The check is
-# mechanical: if writing it makes you reach for `each.key`, it belongs in
-# `apply_infrastructure` below instead. A per-environment grant placed here is
-# not a style mistake — it silently hands every environment what one of them
-# needed, which is the reach the split next door exists to remove.
-data "aws_iam_policy_document" "apply_shared" {
+# The point is that a credential is bounded by the environment it was issued for.
+# Before this, the stage apply role held `s3:*` over prod's site bucket,
+# `ssm:PutParameter` over prod's half of the cross-repository contract, and
+# `cloudfront:DeleteDistribution` over every distribution in the account — not as
+# a residual, but as the ordinary shape of the policy. A stage run that was
+# handed prod's identifiers would have used them.
+data "aws_iam_policy_document" "apply_infrastructure" {
+  for_each = toset(var.environments)
+
+  # The site bucket and its contents.
+  #
+  # `s3:*` on a resource this narrow rather than an enumerated action list, and
+  # the trade is deliberate: the AWS provider touches roughly thirty distinct S3
+  # actions across creating, refreshing and destroying a bucket and its eight
+  # sub-resources, the list grows with every provider release, and a missing
+  # GetBucketNotification breaks an apply the same way a missing CreateBucket
+  # does. The control that matters is which buckets, not which verbs, and the
+  # resource pattern here is a namespace this repository owns outright — kept
+  # disjoint from the state bucket by local.site_bucket_prefix, and kept disjoint
+  # from the other environment by the infix this map adds.
+  statement {
+    sid       = "ManageSiteBuckets"
+    effect    = "Allow"
+    actions   = ["s3:*"]
+    resources = local.site_bucket_arns_by_environment[each.key]
+  }
+
   # CloudFront: the distribution, its origin access control, the two cache
   # policies, the two response headers policies, and the viewer-request
   # function.
@@ -1341,17 +1345,15 @@ data "aws_iam_policy_document" "apply_shared" {
   # out loud.
   #
   # `CreateDistribution` is one of those ten and still takes no ARN, but it has
-  # moved into `CreateSiteDistribution` in `apply_infrastructure`, where a
-  # condition constrains what
+  # moved into `CreateSiteDistribution` below, where a condition constrains what
   # it may be called with rather than where. An action that authorises against
   # `*` is not therefore unconstrainable — that inference is the one this split
   # exists to block.
   #
   # The other twenty-four do take a resource ARN, and where naming one subtracts
   # anything it is named — the five `function` actions, the four
-  # distribution-typed actions, and the three multi-type tag actions are in
-  # `apply_infrastructure`, because naming their ARNs is what makes them
-  # per-environment. This statement holds what was left.
+  # distribution-typed actions, and the three multi-type tag actions are in their
+  # own statements directly below.
   #
   # The twelve remaining cache-policy, response-headers-policy and
   # origin-access-control actions — the deletes, gets, config-gets and updates,
@@ -1447,243 +1449,6 @@ data "aws_iam_policy_document" "apply_shared" {
     ]
 
     resources = ["*"]
-  }
-
-  # Its own statement, because the conditions on `RequestCertificates` would
-  # deny it — and it is in this document rather than beside that one because it
-  # names no environment and carries no condition to make it name one.
-  #
-  # `ListCertificates` is an account-level enumeration that carries no
-  # ValidationMethod key, and an IAM condition on an absent key evaluates false —
-  # so folding it in there would have replaced one silent denial with another.
-  # Nothing in the module calls it today: the provider refreshes a certificate by
-  # ARN through DescribeCertificate, never by listing. It is granted because a
-  # certificate data source is the ordinary next step on this path, and because a
-  # read-only enumeration of certificate metadata is the least of what this role
-  # already holds — not because anything currently needs it.
-  statement {
-    sid       = "ListCertificates"
-    effect    = "Allow"
-    actions   = ["acm:ListCertificates"]
-    resources = ["*"]
-  }
-
-  statement {
-    sid    = "ManageDnsRecords"
-    effect = "Allow"
-
-    actions = [
-      "route53:ChangeResourceRecordSets",
-      "route53:GetHostedZone",
-      "route53:ListResourceRecordSets",
-      "route53:ListTagsForResource",
-    ]
-
-    resources = ["arn:${data.aws_partition.current.partition}:route53:::hostedzone/*"]
-  }
-
-  # ChangeResourceRecordSets returns a change id that the provider polls until
-  # the change is INSYNC, and that poll is authorised against a different ARN
-  # namespace. Zone lookup by name is likewise not resource-scopable.
-  statement {
-    sid    = "ResolveDnsChangesAndZones"
-    effect = "Allow"
-
-    actions = [
-      "route53:GetChange",
-      "route53:ListHostedZones",
-      "route53:ListHostedZonesByName",
-    ]
-
-    resources = ["*"]
-  }
-
-  # ssm:DescribeParameters is an account-level list operation and rejects a
-  # resource-level constraint.
-  statement {
-    sid       = "ListParameters"
-    effect    = "Allow"
-    actions   = ["ssm:DescribeParameters"]
-    resources = ["*"]
-  }
-
-  # CloudFront standard logging v2, which is vended-log delivery rather than the
-  # legacy bucket-ACL path — the delivery source, destination and the link
-  # between them are all CloudWatch Logs resources even when the logs land in
-  # S3. None of these APIs supports resource-level conditions.
-  #
-  # The destination-policy actions are here because a delivery to S3 needs one.
-  #
-  # The module has since chosen its destination — CloudWatch Logs, so that a
-  # teardown never has to empty a log bucket that is still receiving deliveries —
-  # so the log *group* management this statement once deferred is granted below,
-  # scoped to the ARN pattern the module names its groups under rather than to
-  # the account.
-  #
-  # None of the delivery APIs supports a resource-level condition, which is why
-  # this statement is `*` and the actions are enumerated instead.
-  #
-  # The CloudWatch Logs half is not sufficient on its own — see the statement
-  # directly below, which is the half a plan cannot discover.
-  statement {
-    sid    = "ManageLogDelivery"
-    effect = "Allow"
-
-    actions = [
-      "logs:CreateDelivery",
-      "logs:DeleteDelivery",
-      "logs:DeleteDeliveryDestination",
-      "logs:DeleteDeliveryDestinationPolicy",
-      "logs:DeleteDeliverySource",
-
-      # In AWS's documented ListAccessForLogDeliveryActions set alongside the
-      # three Describe* calls below. This apply never reached it — it failed one
-      # call earlier — so it is granted on the documentation's authority rather
-      # than on an observed denial, and that is stated rather than glossed:
-      # discovering it later costs another failed apply, for a list-only action
-      # over AWS-published delivery templates that exposes nothing.
-      "logs:DescribeConfigurationTemplates",
-      "logs:DescribeDeliveries",
-      "logs:DescribeDeliveryDestinations",
-      "logs:DescribeDeliverySources",
-      "logs:GetDelivery",
-      "logs:GetDeliveryDestination",
-      "logs:GetDeliveryDestinationPolicy",
-      "logs:GetDeliverySource",
-      "logs:ListTagsForResource",
-      "logs:PutDeliveryDestination",
-      "logs:PutDeliveryDestinationPolicy",
-      "logs:PutDeliverySource",
-      "logs:TagResource",
-      "logs:UntagResource",
-      "logs:UpdateDeliveryConfiguration",
-    ]
-
-    resources = ["*"]
-  }
-
-  # The source-side half of vended-log delivery, and the half no plan can find.
-  #
-  # PutDeliverySource is a CloudWatch Logs call, but AWS authorises it against
-  # the service that *owns the resource being logged* as well: some services
-  # require "explicit authorization that customers are allowed to send logs from
-  # their resources, as an additional layer of security", expressed as a
-  # permission-only action named <service>:AllowVendedLogDeliveryForResource.
-  # CloudFront is one of them. Without this the call fails with an
-  # AccessDeniedException naming a cloudfront: action, from an API in a
-  # different service, on a role whose logs: grants are complete.
-  #
-  # It is permission-only in the strict sense: it appears in CloudFront's
-  # Service Authorization Reference with IsPermissionManagement set and in none
-  # of its Operations, so no CloudFront API call maps to it and nothing but an
-  # identity policy can grant it. Its one resource type is `distribution`, which
-  # is why this is scoped rather than `*`.
-  #
-  # This is the first defect in this repository that only a real apply could
-  # find, and the reason is worth keeping: `terraform plan` was clean for both
-  # environments against this exact role. A plan never calls PutDeliverySource,
-  # so no amount of planning, linting or scanning could have reached it. It cost
-  # a 15-resource partial apply to discover.
-  statement {
-    sid    = "ServiceLevelAccessForLogDelivery"
-    effect = "Allow"
-
-    actions   = ["cloudfront:AllowVendedLogDeliveryForResource"]
-    resources = local.site_distribution_arns
-  }
-
-  # Vended log delivery authorises itself through an account-level CloudWatch
-  # Logs resource policy — the standing `/aws/vendedlogs/*` entry AWS maintains —
-  # and the delivery APIs read and update it on the caller's behalf. Every action
-  # here is account-level and rejects a resource-level constraint, which is why
-  # this statement is `*` where the one below is scoped: logs:DescribeLogGroups
-  # is a list operation over the account, and a resource policy has no ARN to
-  # name at all.
-  #
-  # The residual risk, named rather than left to be discovered. CloudWatch Logs
-  # resource policies are account-scoped objects with no ARN to condition on, so
-  # logs:PutResourcePolicy on `*` is the only form this grant has — and it lets
-  # this role overwrite any resource policy in the account, including one that
-  # admits log delivery from a different account. Nothing narrows that; the
-  # enumeration above only keeps the grant to the two verbs the delivery APIs
-  # actually call. What bounds it is that this role is assumable solely from a
-  # job that has named a GitHub Environment, and that a policy overwritten here
-  # would be restored by the next apply of the environment that owns it. A
-  # deployment where CloudWatch Logs carries data from more than this repository
-  # should move these two actions to a separate role and grant them only for the
-  # duration of an apply.
-  statement {
-    sid    = "ManageVendedLogDeliveryPolicy"
-    effect = "Allow"
-
-    actions = [
-      "logs:DescribeLogGroups",
-      "logs:DescribeResourcePolicies",
-      "logs:PutResourcePolicy",
-    ]
-
-    resources = ["*"]
-  }
-
-  # The end-to-end workflow's teardown assertion queries this API by the
-  # Project and Env tags to prove a destroy left nothing behind. It supports no
-  # resource-level conditions and it only reads.
-  statement {
-    sid    = "VerifyTeardownByTag"
-    effect = "Allow"
-
-    actions = [
-      "tag:GetResources",
-      "tag:GetTagKeys",
-      "tag:GetTagValues",
-    ]
-
-    resources = ["*"]
-  }
-}
-
-# What apply may do to the infrastructure the environments actually describe,
-# for one environment.
-#
-# Derived service by service from what this repository creates, rather than from
-# a managed policy that happens to cover it. Everything absent is absent on
-# purpose: there is no EC2, no VPC, no RDS, no Lambda and no KMS here, and the
-# day one of those is added this policy should be the thing that says so.
-#
-# Rendered once per environment, and every grant in here names one: the site
-# bucket and its objects, the contract parameter path, the access log groups and
-# the CloudFront function by ARN, and the distribution create, the four
-# distribution actions and the certificate delete by an `aws:RequestTag/Name` or
-# `aws:ResourceTag/Name` condition. That is the whole of this document — the
-# grants that could not name an environment live in
-# `data.aws_iam_policy_document.apply_shared` above, and the division between the
-# two files' worth of statements is exactly that question.
-#
-# The point is that a credential is bounded by the environment it was issued for.
-# Before the split the stage apply role held `s3:*` over prod's site bucket,
-# `ssm:PutParameter` over prod's half of the cross-repository contract, and
-# `cloudfront:DeleteDistribution` over every distribution in the account — not as
-# a residual, but as the ordinary shape of the policy. A stage run that was
-# handed prod's identifiers would have used them.
-data "aws_iam_policy_document" "apply_infrastructure" {
-  for_each = toset(var.environments)
-
-  # The site bucket and its contents.
-  #
-  # `s3:*` on a resource this narrow rather than an enumerated action list, and
-  # the trade is deliberate: the AWS provider touches roughly thirty distinct S3
-  # actions across creating, refreshing and destroying a bucket and its eight
-  # sub-resources, the list grows with every provider release, and a missing
-  # GetBucketNotification breaks an apply the same way a missing CreateBucket
-  # does. The control that matters is which buckets, not which verbs, and the
-  # resource pattern here is a namespace this repository owns outright — kept
-  # disjoint from the state bucket by local.site_bucket_prefix, and kept disjoint
-  # from the other environment by the infix this map adds.
-  statement {
-    sid       = "ManageSiteBuckets"
-    effect    = "Allow"
-    actions   = ["s3:*"]
-    resources = local.site_bucket_arns_by_environment[each.key]
   }
 
   # Creating the distribution, constrained by the tag it must be created with.
@@ -2116,6 +1881,54 @@ data "aws_iam_policy_document" "apply_infrastructure" {
     }
   }
 
+  # Its own statement, because the conditions on `RequestCertificates` above
+  # would deny it.
+  #
+  # `ListCertificates` is an account-level enumeration that carries no
+  # ValidationMethod key, and an IAM condition on an absent key evaluates false —
+  # so folding it in there would have replaced one silent denial with another.
+  # Nothing in the module calls it today: the provider refreshes a certificate by
+  # ARN through DescribeCertificate, never by listing. It is granted because a
+  # certificate data source is the ordinary next step on this path, and because a
+  # read-only enumeration of certificate metadata is the least of what this role
+  # already holds — not because anything currently needs it.
+  statement {
+    sid       = "ListCertificates"
+    effect    = "Allow"
+    actions   = ["acm:ListCertificates"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "ManageDnsRecords"
+    effect = "Allow"
+
+    actions = [
+      "route53:ChangeResourceRecordSets",
+      "route53:GetHostedZone",
+      "route53:ListResourceRecordSets",
+      "route53:ListTagsForResource",
+    ]
+
+    resources = ["arn:${data.aws_partition.current.partition}:route53:::hostedzone/*"]
+  }
+
+  # ChangeResourceRecordSets returns a change id that the provider polls until
+  # the change is INSYNC, and that poll is authorised against a different ARN
+  # namespace. Zone lookup by name is likewise not resource-scopable.
+  statement {
+    sid    = "ResolveDnsChangesAndZones"
+    effect = "Allow"
+
+    actions = [
+      "route53:GetChange",
+      "route53:ListHostedZones",
+      "route53:ListHostedZonesByName",
+    ]
+
+    resources = ["*"]
+  }
+
   # The cross-repository contract: three String parameters per environment,
   # under the path segment this environment owns.
   #
@@ -2140,6 +1953,133 @@ data "aws_iam_policy_document" "apply_infrastructure" {
     ]
 
     resources = [local.ssm_parameter_arn_pattern_by_environment[each.key]]
+  }
+
+  # ssm:DescribeParameters is an account-level list operation and rejects a
+  # resource-level constraint.
+  statement {
+    sid       = "ListParameters"
+    effect    = "Allow"
+    actions   = ["ssm:DescribeParameters"]
+    resources = ["*"]
+  }
+
+  # CloudFront standard logging v2, which is vended-log delivery rather than the
+  # legacy bucket-ACL path — the delivery source, destination and the link
+  # between them are all CloudWatch Logs resources even when the logs land in
+  # S3. None of these APIs supports resource-level conditions.
+  #
+  # The destination-policy actions are here because a delivery to S3 needs one.
+  #
+  # The module has since chosen its destination — CloudWatch Logs, so that a
+  # teardown never has to empty a log bucket that is still receiving deliveries —
+  # so the log *group* management this statement once deferred is granted below,
+  # scoped to the ARN pattern the module names its groups under rather than to
+  # the account.
+  #
+  # None of the delivery APIs supports a resource-level condition, which is why
+  # this statement is `*` and the actions are enumerated instead.
+  #
+  # The CloudWatch Logs half is not sufficient on its own — see the statement
+  # directly below, which is the half a plan cannot discover.
+  statement {
+    sid    = "ManageLogDelivery"
+    effect = "Allow"
+
+    actions = [
+      "logs:CreateDelivery",
+      "logs:DeleteDelivery",
+      "logs:DeleteDeliveryDestination",
+      "logs:DeleteDeliveryDestinationPolicy",
+      "logs:DeleteDeliverySource",
+
+      # In AWS's documented ListAccessForLogDeliveryActions set alongside the
+      # three Describe* calls below. This apply never reached it — it failed one
+      # call earlier — so it is granted on the documentation's authority rather
+      # than on an observed denial, and that is stated rather than glossed:
+      # discovering it later costs another failed apply, for a list-only action
+      # over AWS-published delivery templates that exposes nothing.
+      "logs:DescribeConfigurationTemplates",
+      "logs:DescribeDeliveries",
+      "logs:DescribeDeliveryDestinations",
+      "logs:DescribeDeliverySources",
+      "logs:GetDelivery",
+      "logs:GetDeliveryDestination",
+      "logs:GetDeliveryDestinationPolicy",
+      "logs:GetDeliverySource",
+      "logs:ListTagsForResource",
+      "logs:PutDeliveryDestination",
+      "logs:PutDeliveryDestinationPolicy",
+      "logs:PutDeliverySource",
+      "logs:TagResource",
+      "logs:UntagResource",
+      "logs:UpdateDeliveryConfiguration",
+    ]
+
+    resources = ["*"]
+  }
+
+  # The source-side half of vended-log delivery, and the half no plan can find.
+  #
+  # PutDeliverySource is a CloudWatch Logs call, but AWS authorises it against
+  # the service that *owns the resource being logged* as well: some services
+  # require "explicit authorization that customers are allowed to send logs from
+  # their resources, as an additional layer of security", expressed as a
+  # permission-only action named <service>:AllowVendedLogDeliveryForResource.
+  # CloudFront is one of them. Without this the call fails with an
+  # AccessDeniedException naming a cloudfront: action, from an API in a
+  # different service, on a role whose logs: grants are complete.
+  #
+  # It is permission-only in the strict sense: it appears in CloudFront's
+  # Service Authorization Reference with IsPermissionManagement set and in none
+  # of its Operations, so no CloudFront API call maps to it and nothing but an
+  # identity policy can grant it. Its one resource type is `distribution`, which
+  # is why this is scoped rather than `*`.
+  #
+  # This is the first defect in this repository that only a real apply could
+  # find, and the reason is worth keeping: `terraform plan` was clean for both
+  # environments against this exact role. A plan never calls PutDeliverySource,
+  # so no amount of planning, linting or scanning could have reached it. It cost
+  # a 15-resource partial apply to discover.
+  statement {
+    sid    = "ServiceLevelAccessForLogDelivery"
+    effect = "Allow"
+
+    actions   = ["cloudfront:AllowVendedLogDeliveryForResource"]
+    resources = local.site_distribution_arns
+  }
+
+  # Vended log delivery authorises itself through an account-level CloudWatch
+  # Logs resource policy — the standing `/aws/vendedlogs/*` entry AWS maintains —
+  # and the delivery APIs read and update it on the caller's behalf. Every action
+  # here is account-level and rejects a resource-level constraint, which is why
+  # this statement is `*` where the one below is scoped: logs:DescribeLogGroups
+  # is a list operation over the account, and a resource policy has no ARN to
+  # name at all.
+  #
+  # The residual risk, named rather than left to be discovered. CloudWatch Logs
+  # resource policies are account-scoped objects with no ARN to condition on, so
+  # logs:PutResourcePolicy on `*` is the only form this grant has — and it lets
+  # this role overwrite any resource policy in the account, including one that
+  # admits log delivery from a different account. Nothing narrows that; the
+  # enumeration above only keeps the grant to the two verbs the delivery APIs
+  # actually call. What bounds it is that this role is assumable solely from a
+  # job that has named a GitHub Environment, and that a policy overwritten here
+  # would be restored by the next apply of the environment that owns it. A
+  # deployment where CloudWatch Logs carries data from more than this repository
+  # should move these two actions to a separate role and grant them only for the
+  # duration of an apply.
+  statement {
+    sid    = "ManageVendedLogDeliveryPolicy"
+    effect = "Allow"
+
+    actions = [
+      "logs:DescribeLogGroups",
+      "logs:DescribeResourcePolicies",
+      "logs:PutResourcePolicy",
+    ]
+
+    resources = ["*"]
   }
 
   # The log groups themselves, scoped to the prefix the module owns.
@@ -2170,6 +2110,21 @@ data "aws_iam_policy_document" "apply_infrastructure" {
     resources = local.access_log_group_arns_by_environment[each.key]
   }
 
+  # The end-to-end workflow's teardown assertion queries this API by the
+  # Project and Env tags to prove a destroy left nothing behind. It supports no
+  # resource-level conditions and it only reads.
+  statement {
+    sid    = "VerifyTeardownByTag"
+    effect = "Allow"
+
+    actions = [
+      "tag:GetResources",
+      "tag:GetTagKeys",
+      "tag:GetTagValues",
+    ]
+
+    resources = ["*"]
+  }
 }
 
 # The permissions boundary the deploy role is required to carry.
@@ -2684,25 +2639,24 @@ data "aws_iam_policy_document" "apply_identity" {
 # not buy headroom; moving to a managed policy (6,144 characters each, ten
 # attachable) is the escape, at the cost of the property in the first sentence.
 #
-# That escape has since been taken, once, and the numbers are worth keeping
-# because the cap is closer than it reads. Conditioning the distribution actions
-# and scoping the per-environment grants took the stage role's three inline
-# policies to 11,146 characters — past the cap, so the apply would have failed on
-# `iam:PutRolePolicy` rather than degrading. `aws_iam_policy.apply_shared` holds
-# the nine statements that name no environment, which is what made the cost
-# "once" rather than "once per environment": the same 3,456 characters were
-# being rendered into both roles. After the split, stage stands at 7,740 of
-# 10,240 inline, prod at 7,726, and the managed policy at 3,456 of its own
-# 6,144. Both budgets are now real budgets rather than one budget and a
-# formality, and a future grant has to be priced against whichever it lands in.
+# **Measure it the way IAM measures it, which is with whitespace stripped.** AWS
+# documents that it does not count whitespace, and
+# `data.aws_iam_policy_document` renders indented JSON — about a third larger
+# than what counts. Measuring the rendered form once produced 11,146 characters
+# for a stage role that was really carrying 5,600, and an escape was very nearly
+# taken for a cap that was never approached.
+# `check "apply_inline_policies_fit_the_cap"` now does the stripping, so the
+# number a plan reports is the number IAM will apply the limit to.
 #
-# `aws_iam_policy.app_deploy_boundary` and `aws_iam_policy.apply_shared` are the
-# two exceptions to the first sentence. The boundary's own comment says why it
-# has to be one: the lifetime argument is not merely inapplicable to it but
-# inverted, since it is meant to outlive the roles it applies to.
-# `apply_shared` has no such excuse and does not claim one — it is a managed
-# policy because the arithmetic left no alternative, and it accepts the orphan
-# risk the first sentence exists to avoid.
+# Where it actually stands, read off the live stage role on 2026-09-06: identity
+# 1,447, terraform-state 1,064, infrastructure 3,089 — 5,600 of 10,240, with
+# 4,640 to spare. Adding the tag conditions and the per-environment scoping cost
+# about 1,075 of that. The cap is real and worth an assertion; it is not close.
+#
+# `aws_iam_policy.app_deploy_boundary` is the one exception to the first
+# sentence, and its own comment says why it has to be: the lifetime argument is
+# not merely inapplicable to it but inverted, since it is meant to outlive the
+# roles it applies to.
 #
 # One consequence for anything outside this repository that mirrors these three
 # inline policies.
@@ -2744,14 +2698,6 @@ data "aws_iam_policy_document" "apply_identity" {
 # restores exactly the cross-environment reach this file spent three changes
 # removing from CI.
 #
-# There is now a fourth policy, and it is the one that does not need mirroring
-# by hand. `aws_iam_policy.apply_shared` is a customer-managed policy, so a
-# mirror can simply attach it — `aws iam attach-role-policy` with that ARN —
-# rather than copying its body anywhere, and it then cannot drift at all. Three
-# inline documents to keep in step, one ARN to attach. Whoever maintains such an
-# identity should prefer the attachment: it is the only part of this file a
-# mirror can hold by reference instead of by copy.
-#
 # Edit any of these documents and re-sync every mirror of it in the same change,
 # not a follow-up one. A mirror that has fallen behind does not
 # fail at plan time — it fails part-way through a destroy, after the inline
@@ -2783,69 +2729,51 @@ resource "aws_iam_role_policy" "apply_infrastructure" {
   policy = data.aws_iam_policy_document.apply_infrastructure[each.key].json
 }
 
-# The environment-independent half, as the one managed policy both apply roles
-# attach. `data.aws_iam_policy_document.apply_shared` carries why it is managed
-# rather than inline; this is the resource pair that attaches it.
-#
-# Attached with `aws_iam_role_policy_attachment` rather than named in the role's
-# `managed_policy_arns`, because that argument is exclusive: setting it makes
-# Terraform remove any attachment it does not list, which is a footgun in a root
-# whose whole subject is IAM. The attachment resource is additive and its
-# destroy detaches before the policy or the role is removed.
-resource "aws_iam_policy" "apply_shared" {
-  name = "${var.name_prefix}-ci-apply-shared"
-
-  # Explicit at its default for the same reason `app_deploy_boundary` sets it:
-  # a path is part of the ARN, and moving it silently invalidates anything that
-  # composed the ARN by hand. Nothing composes this one — the attachment below
-  # references the resource — but the two policies in this file should not
-  # disagree about whether `path` is a thing they state.
-  path = "/"
-
-  description = "Grants shared by every environment's CI apply role: the CloudFront actions that authorise only against *, the account-level enumerations, log delivery, and the teardown tag query. Managed rather than inline because the three inline policies are near IAM's 10,240-character aggregate cap."
-  policy      = data.aws_iam_policy_document.apply_shared.json
-}
-
-resource "aws_iam_role_policy_attachment" "apply_shared" {
-  for_each = aws_iam_role.apply
-
-  role       = each.value.name
-  policy_arn = aws_iam_policy.apply_shared.arn
-}
-
 # The cap, asserted rather than remembered.
 #
-# This exists because the cap was hit, not because it might be. Adding the tag
-# conditions and the per-environment scoping took the stage role to 11,146
-# characters against a 10,240 limit, and nothing in this repository said so:
-# `terraform validate`, `fmt`, TFLint, Trivy and the module tests all passed on a
-# configuration that could not be applied. The failure would have arrived as a
-# `LimitExceeded` on `iam:PutRolePolicy`, part-way through a hand-run apply of
-# this root, against an account where two of the three policies had already been
+# IAM caps the *aggregate* size of one role's inline policies at 10,240
+# characters, and this file has three on every apply role. The limit is shared
+# across them, so splitting a long policy into two buys nothing; past it,
+# `iam:PutRolePolicy` fails with LimitExceeded part-way through a hand-run apply
+# of this root, against an account where the earlier policies have already been
 # written.
+#
+# Nothing else in this repository would say so. `terraform validate`, `fmt`,
+# TFLint, Trivy and the module tests all pass on a configuration that is over the
+# cap: it is well formed, it is valid, and it cannot be applied. That gap is why
+# this block exists — the conditions and per-environment scoping this document
+# now carries were written, measured wrong, and nearly shipped on the strength of
+# a number nobody could check.
+#
+# **Whitespace is not counted.** AWS documents that explicitly, and it is the
+# whole reason this assertion strips it rather than measuring `.json` directly.
+# `data.aws_iam_policy_document` renders indented JSON, which is roughly a third
+# larger than what IAM actually counts — measuring the rendered form reports
+# ~8,000 characters where the real figure is ~5,600, and a threshold set against
+# it would fire while a third of the budget was still free. Measured on the live
+# stage role on 2026-09-06: identity 1,447, terraform-state 1,064,
+# infrastructure 3,089 — 5,600 of 10,240, with 4,640 to spare.
 #
 # A `check` rather than a `precondition` or a `validation`, for the reason the
 # other check in this file gives: a check reports on every plan and does not
-# block the apply that would fix what it reports. A hard failure here would be
-# the wrong shape, because the remedy for "over the cap" is usually to move a
-# statement into `apply_shared` — an edit this root has to be able to apply.
+# block the apply that would fix what it reports. A hard failure would be the
+# wrong shape here, because the remedy for going over is an edit to this root,
+# and this root has to stay appliable to carry it.
 #
-# It measures the three inline documents and not the managed policy, because
-# they are the ones that share a budget. `aws_iam_policy.apply_shared` has its
-# own 6,144-character limit, is not near it, and would fail loudly and alone.
-#
-# 9,700 rather than 10,240, so that the warning arrives while there is still room
-# to act on it rather than at the moment the apply breaks.
+# 9,000 rather than 10,240, so the warning arrives with room to act on it. The
+# escape, if it ever fires, is the one the note further down names: a
+# customer-managed policy, 6,144 characters each and ten attachable, at the cost
+# of the inline-lifetime property that note argues for.
 check "apply_inline_policies_fit_the_cap" {
   assert {
     condition = alltrue([
       for environment in var.environments : (
-        length(data.aws_iam_policy_document.apply_infrastructure[environment].json)
-        + length(data.aws_iam_policy_document.apply_identity[environment].json)
-        + length(data.aws_iam_policy_document.apply_state[environment].json)
-      ) < 9700
+        length(replace(data.aws_iam_policy_document.apply_infrastructure[environment].json, "/\\s/", ""))
+        + length(replace(data.aws_iam_policy_document.apply_identity[environment].json, "/\\s/", ""))
+        + length(replace(data.aws_iam_policy_document.apply_state[environment].json, "/\\s/", ""))
+      ) < 9000
     ])
-    error_message = "An apply role's three inline policies are within 540 characters of IAM's 10,240-character aggregate cap. IAM applies that limit to the *sum* of a role's inline policies, so splitting one into two buys nothing; past it, `iam:PutRolePolicy` fails with LimitExceeded part-way through applying this root. Move a statement that names no environment into `data.aws_iam_policy_document.apply_shared` — it is a customer-managed policy with its own 6,144-character budget, attached to every apply role, and that is what it exists for. A statement that does name an environment cannot move there; it has to be shortened or dropped instead."
+    error_message = "An apply role's three inline policies are within 1,240 characters of IAM's 10,240-character aggregate cap, measured the way IAM measures it — with whitespace stripped. The limit applies to the *sum* of a role's inline policies, so splitting one into two buys nothing; past it, `iam:PutRolePolicy` fails with LimitExceeded part-way through applying this root, after the earlier policies have already been written. The escape is a customer-managed policy: 6,144 characters each, ten attachable, at the cost of the lifetime property the note above `aws_iam_role_policy.apply_state` argues for. Statements that name no environment are the ones that can move, because one managed policy can then serve every apply role."
   }
 }
 
