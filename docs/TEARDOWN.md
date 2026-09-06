@@ -613,26 +613,10 @@ same category of error as the 15–20 minute figure in section 3.
 
 ## 8. Tearing down the bootstrap
 
-The state bucket, the OIDC provider, the app-deploy boundary policy and the shared apply policy
-are the only things in this design that outlive a cycle. This repository treats anything that
-survives a destroy as a defect; the bootstrap is the honest exception, and an exception is only
-honest if its removal path is written down.
-
-`<name_prefix>-ci-apply-shared` is the newest of the four and the one a reader will not expect,
-because every other grant the apply roles hold is an inline policy that dies with its role. It is
-a customer-managed policy for a reason `bootstrap/oidc.tf` states at the document — the three
-inline policies are near IAM's 10,240-character aggregate cap — and it carries the cost that
-comes with that: it is a separate object, and deleting the apply roles by hand leaves it behind.
-`terraform -chdir=bootstrap destroy` detaches and removes it in order and needs nothing extra
-here. A hand-run teardown does not, so add it to what section 6's sweep looks for:
-
-```bash
-aws iam list-policies --scope Local --query \
-  "Policies[?starts_with(PolicyName, '<name_prefix>-')].[PolicyName,AttachmentCount]" --output table
-```
-
-Two entries are expected while the bootstrap stands, `-app-deploy-boundary` and
-`-ci-apply-shared`, and none after it is destroyed.
+The state bucket, the OIDC provider and the app-deploy boundary policy are the only things in
+this design that outlive a cycle. This repository treats anything that survives a destroy as a
+defect; the bootstrap is the honest exception, and an exception is only honest if its removal
+path is written down.
 
 **Destroy every environment and run section 6's sweep before touching anything here.** Emptying
 the state bucket while an environment still stands strands its infrastructure with nothing left
