@@ -522,9 +522,12 @@ confirms:
 `aws cloudfront list-distributions` returns everything in the account, and on the account this
 was measured in it returned one distribution belonging to an unrelated project. **Match against
 the module's naming before deleting anything by hand.** The same caution applies in the other
-direction and is worth stating plainly: in a shared account the CI apply role can update and
-delete distributions this repository did not create. In an account that hosts anything else,
-treat a hand-run destroy with a `-target` as the highest-risk command in this document.
+direction. That warning used to say the CI apply role could update and delete distributions this
+repository did not create; it no longer can. `ManageSiteDistributions` conditions all four
+distribution-typed actions on `aws:ResourceTag/Name` matching `<name_prefix>-site-<env>-*`, so a
+foreign distribution is out of reach of the credential, and so is the other environment's. Treat
+a hand-run destroy with a `-target` as the highest-risk command in this document anyway — the
+condition bounds which resources a mistake can reach, not whether you make one.
 
 That exposure is deferred, not permanent, and the argument that makes it look permanent is the
 one to refuse: that the apply role's CloudFront grants cannot be scoped by resource because
@@ -552,18 +555,24 @@ Part of the surface is already scoped rather than merely scopable. `ManageSiteFu
 the distribution and function ARNs, so the function half of this warning no longer applies: the
 role cannot delete, update or publish a CloudFront function outside this repository's namespace,
 in a shared account or any other. `ManageCertificates` has always been scoped to `certificate/*`.
-What remains account-wide is the distribution half — the four actions above, plus the five
-creates and five enumerations that are account-wide permanently — and
-`docs/CLOUDFRONT_IAM_SCOPING_PLAN.md` carries the backlog that narrows it.
+The distribution half is now scoped too. `ManageSiteDistributions` conditions
+`DeleteDistribution`, `UpdateDistribution`, `GetDistribution` and `GetDistributionConfig` on
+`aws:ResourceTag/Name`, and `CreateSiteDistribution` conditions the create on
+`aws:RequestTag/Name`, so every distribution the role can mint is one it can also remove and no
+other. What stays account-wide permanently is the ten actions that take no resource type, plus
+the twelve cache-policy, response-headers-policy and origin-access-control actions whose resource
+types carry no tag to condition on.
 
-So the warning above stands today, but it stands as a statement about the grant as it is written
-rather than about what CloudFront permits. One thing to know before the condition lands, so it is
-not read as more than it is: `TagSiteCdnResources` grants `cloudfront:TagResource` on
-`distribution/*` unconditioned and cannot be conditioned, because `CreateDistributionWithTags`
-authorises the create and the tag together against a resource that does not exist yet. A foreign
-distribution can therefore be retagged into scope and then deleted, in two calls. A tag condition
-closes the accident this section is actually about — a bad merge, a `-target` typo, a destroy
-pointed at the wrong root — and it is not a boundary against somebody holding the credential.
+**The condition is a guard against accidents, not against an attacker holding the credential**,
+and the reason is worth keeping in front of anyone reading this section.
+`TagSiteCdnResources` grants `cloudfront:TagResource` on `distribution/*` unconditioned and
+cannot be conditioned, because `CreateDistributionWithTags` authorises the create and the tag
+together against a resource that does not exist yet. A foreign distribution can therefore be
+retagged into scope and then deleted, in two calls. What the condition closes is the accident
+this section is actually about — a bad merge, a `-target` typo, a destroy pointed at the wrong
+root. `UntagSiteCdnResources` closes the matching self-inflicted case in the other direction: the
+role cannot remove the `Name` tag it now depends on, which would otherwise strand a standing
+distribution in one call.
 
 ### 6.4 One thing this checklist cannot tell you
 
@@ -604,10 +613,26 @@ same category of error as the 15–20 minute figure in section 3.
 
 ## 8. Tearing down the bootstrap
 
-The state bucket, the OIDC provider and the app-deploy boundary policy are the only things in
-this design that outlive a cycle. This repository treats anything that survives a destroy as a
-defect; the bootstrap is the honest exception, and an exception is only honest if its removal
-path is written down.
+The state bucket, the OIDC provider, the app-deploy boundary policy and the shared apply policy
+are the only things in this design that outlive a cycle. This repository treats anything that
+survives a destroy as a defect; the bootstrap is the honest exception, and an exception is only
+honest if its removal path is written down.
+
+`<name_prefix>-ci-apply-shared` is the newest of the four and the one a reader will not expect,
+because every other grant the apply roles hold is an inline policy that dies with its role. It is
+a customer-managed policy for a reason `bootstrap/oidc.tf` states at the document — the three
+inline policies are near IAM's 10,240-character aggregate cap — and it carries the cost that
+comes with that: it is a separate object, and deleting the apply roles by hand leaves it behind.
+`terraform -chdir=bootstrap destroy` detaches and removes it in order and needs nothing extra
+here. A hand-run teardown does not, so add it to what section 6's sweep looks for:
+
+```bash
+aws iam list-policies --scope Local --query \
+  "Policies[?starts_with(PolicyName, '<name_prefix>-')].[PolicyName,AttachmentCount]" --output table
+```
+
+Two entries are expected while the bootstrap stands, `-app-deploy-boundary` and
+`-ci-apply-shared`, and none after it is destroyed.
 
 **Destroy every environment and run section 6's sweep before touching anything here.** Emptying
 the state bucket while an environment still stands strands its infrastructure with nothing left
