@@ -79,7 +79,7 @@ output "app_deploy_boundary_policy_name" {
 }
 
 output "site_bucket_name_prefix" {
-  description = "Required name prefix for site buckets. The apply roles share one S3 grant and it is scoped to this pattern, deliberately disjoint from the state bucket's name, so a bucket named outside it cannot be created by CI."
+  description = "Required name prefix for site buckets. Each apply role's S3 grant is scoped to this pattern plus its own environment, deliberately disjoint from the state bucket's name, so a bucket named outside it cannot be created by CI — and one environment's role cannot reach another's bucket."
   value       = local.site_bucket_prefix
 }
 

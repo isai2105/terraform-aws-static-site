@@ -177,6 +177,132 @@ jobs:
       - name: Check formatting and validate
         run: make fmt-check validate
 
+  # The two strings that couple the bootstrap root to the environment roots, and
+  # that nothing else can check.
+  #
+  # `terraform validate` cannot see this. The roots are separate configurations
+  # with separate states, deliberately: the bootstrap exposes no
+  # `terraform_remote_state` for the environments to read, so no expression in
+  # either root references the other and no plan compares them. What holds them
+  # equal is that somebody typed the same thing twice.
+  #
+  # `bootstrap/oidc.tf` spends both of them. `name_prefix` composes the site
+  # bucket pattern, the CloudFront function pattern, the access log group
+  # pattern and the `aws:ResourceTag/Name` conditions on the distribution and
+  # certificate statements; `environments` composes the per-environment renderings
+  # of the three inline policies and the exact app deploy role ARN in each. A
+  # disagreement in either does not fail at plan. It fails at apply, as an
+  # AccessDenied naming a resource rather than naming the mistake, after the
+  # bootstrap has already been hand-applied and the operator has moved on.
+  #
+  # Both are already guarded at runtime — a wrong `name_prefix` is refused at
+  # `s3:CreateBucket`, a wrong `environments` entry at `iam:CreateRole` — and
+  # those guards are why the failure is survivable rather than silent. This job
+  # is the cheaper half of the same control: the runtime guards cost a failed
+  # apply against a real account to learn something a string comparison in a
+  # credential-free lane can say at review time.
+  #
+  # No AWS anything. Three files read, no network, no role, no token.
+  cross-root-consistency:
+    name: cross-root-consistency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check name_prefix and environments agree across the roots
+        run: |
+          set -euo pipefail
+
+          failed=0
+          fail() {
+            echo "::error::$*"
+            failed=1
+          }
+
+          # The first `name_prefix = "..."` assignment in a tfvars. Anchored to
+          # the start of the line so a mention inside a comment cannot match:
+          # every comment line in these files begins with `#`.
+          read_name_prefix() {
+            sed -n 's/^[[:space:]]*name_prefix[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n 1
+          }
+
+          bootstrap_prefix="$(read_name_prefix bootstrap/terraform.tfvars)"
+          if [ -z "$bootstrap_prefix" ]; then
+            fail "could not read name_prefix from bootstrap/terraform.tfvars"
+          fi
+
+          # `environments = ["stage", "prod"]`, flattened to one name per line.
+          bootstrap_environments="$(
+            sed -n 's/^[[:space:]]*environments[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' \
+              bootstrap/terraform.tfvars |
+              head -n 1 |
+              tr ',' '\n' |
+              tr -d ' "' |
+              grep -v '^$' |
+              sort
+          )"
+          if [ -z "$bootstrap_environments" ]; then
+            fail "could not read environments from bootstrap/terraform.tfvars"
+          fi
+
+          # The directories that actually exist, which is the third party to the
+          # agreement: an environment listed in the bootstrap with no root to
+          # apply it is as broken as a root the bootstrap issues no role for.
+          env_directories="$(find envs -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)"
+
+          if [ "$bootstrap_environments" != "$env_directories" ]; then
+            fail "bootstrap/terraform.tfvars environments does not match the directories under envs/." \
+              "bootstrap lists: $(echo "$bootstrap_environments" | tr '\n' ' ')." \
+              "envs/ contains: $(echo "$env_directories" | tr '\n' ' ')." \
+              "Each entry composes an apply role and its three inline policies in bootstrap/oidc.tf."
+          fi
+
+          for environment in $env_directories; do
+            tfvars="envs/${environment}/terraform.tfvars"
+            main="envs/${environment}/main.tf"
+
+            environment_prefix="$(read_name_prefix "$tfvars")"
+            if [ -z "$environment_prefix" ]; then
+              fail "could not read name_prefix from ${tfvars}"
+            elif [ "$environment_prefix" != "$bootstrap_prefix" ]; then
+              fail "name_prefix disagrees: bootstrap/terraform.tfvars has '${bootstrap_prefix}'," \
+                "${tfvars} has '${environment_prefix}'." \
+                "Every resource-level grant and tag condition in bootstrap/oidc.tf is composed from the bootstrap value;" \
+                "the environments name their resources from theirs."
+            fi
+
+            # The `environment` local, which is a constant in each root rather
+            # than an input precisely so that `-var environment=stage` cannot
+            # apply stage-named resources from the prod directory. That makes it
+            # a fourth copy of the same string, and the one furthest from the
+            # bootstrap that reads it.
+            environment_local="$(
+              sed -n 's/^[[:space:]]*environment[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$main" | head -n 1
+            )"
+            if [ -z "$environment_local" ]; then
+              fail "could not read the environment local from ${main}"
+            elif [ "$environment_local" != "$environment" ]; then
+              fail "${main} sets environment = '${environment_local}' but lives in envs/${environment}." \
+                "The apply role for '${environment}' is scoped to resources named for '${environment}';" \
+                "applying this root with it would be refused at s3:CreateBucket."
+            fi
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo "cross-root consistency: FAILED"
+            exit 1
+          fi
+
+          echo "cross-root consistency: ok"
+          echo "  name_prefix  = ${bootstrap_prefix} (bootstrap and every environment)"
+          echo "  environments = $(echo "$bootstrap_environments" | tr '\n' ' ')"
+
   # Everything `terraform validate` has no opinion about: deprecated syntax,
   # instance types that do not exist, declarations nobody reads, names in the
   # wrong case. The AWS ruleset's deep-check rules — the only ones that would

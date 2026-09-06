@@ -116,12 +116,20 @@ fails at the first CI run with an `AssumeRoleWithWebIdentity` error that gives n
 
 **Use an AWS account that holds nothing you are unwilling to lose.** The AWS account, not the
 GitHub one: GitHub appears here only as the OIDC issuer that mints the token, and no role this
-repository creates has any access to your repositories. Inside AWS, `bootstrap/oidc.tf` grants the
-CI apply roles `cloudfront:DeleteDistribution` and `cloudfront:UpdateDistribution` on
-`Resource: "*"`, and `acm:DeleteCertificate` on every certificate in the AWS account, because a
-distribution's id is not knowable in advance. That is defensible in a dedicated AWS account and
-only there. A pre-existing distribution in that same AWS account is inside the blast radius of a
-bad merge.
+repository creates has any access to your repositories.
+
+Inside AWS, the CI apply roles no longer reach a distribution or a certificate that is not theirs.
+`cloudfront:DeleteDistribution`, `UpdateDistribution`, `GetDistribution` and `GetDistributionConfig`
+are conditioned on `aws:ResourceTag/Name` matching `<name_prefix>-site-<env>-*`, and
+`acm:DeleteCertificate` on the same pattern — so a pre-existing distribution or certificate in the
+same account is outside the blast radius of a bad merge, and so is the *other* environment's.
+
+What stays account-wide is the CloudFront surface that carries no tag to condition on: the apply
+roles can create, read, update and delete **cache policies, response headers policies and origin
+access controls** anywhere in the account. None of those three resource types is taggable, so
+there is nothing to scope them by; `bootstrap/oidc.tf` says so at the statement that grants them.
+Deleting a cache policy another distribution is using is a real way to break something outside this
+repository. That is defensible in a dedicated AWS account and only there.
 
 ### 1. Bootstrap — once, by hand
 
