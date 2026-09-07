@@ -2643,15 +2643,19 @@ data "aws_iam_policy_document" "apply_identity" {
 # documents that it does not count whitespace, and
 # `data.aws_iam_policy_document` renders indented JSON — about a third larger
 # than what counts. Measuring the rendered form once produced 11,146 characters
-# for a stage role that was really carrying 5,600, and an escape was very nearly
+# for a stage role that was really carrying 8,100, and an escape was very nearly
 # taken for a cap that was never approached.
 # `check "apply_inline_policies_fit_the_cap"` now does the stripping, so the
 # number a plan reports is the number IAM will apply the limit to.
 #
-# Where it actually stands, read off the live stage role on 2026-09-06: identity
-# 1,447, terraform-state 1,064, infrastructure 3,089 — 5,600 of 10,240, with
-# 4,640 to spare. Adding the tag conditions and the per-environment scoping cost
-# about 1,075 of that. The cap is real and worth an assertion; it is not close.
+# Where it actually stands, read off the live stage role on 2026-09-07, with the
+# per-environment scoping applied: identity 1,447, terraform-state 1,064,
+# infrastructure 5,589 — 8,100 of 10,240, with 2,140 to spare. The tag
+# conditions and the per-environment scoping cost 1,075 of that: infrastructure
+# was 4,514 across 16 statements before them and is 5,589 across 21 now, while
+# the other two did not change. The cap is real and worth an assertion, and the
+# margin is no longer generous — `check "apply_inline_policies_fit_the_cap"`
+# fires at 9,000, which is 900 above where this sits.
 #
 # `aws_iam_policy.app_deploy_boundary` is the one exception to the first
 # sentence, and its own comment says why it has to be: the lifetime argument is
@@ -2691,12 +2695,24 @@ data "aws_iam_policy_document" "apply_identity" {
 # at whichever of those it reaches first — in practice `s3:CreateBucket`, naming
 # a bucket outside the pattern.
 #
-# So for all three: mirror one copy per environment, or hold the union as a
-# deliberate choice. The union is a real option and not a lazy one — a human
-# operator who may apply either environment from a laptop needs both anyway —
-# but it has to be chosen rather than arrived at, because a union quietly
-# restores exactly the cross-environment reach this file spent three changes
-# removing from CI.
+# So for all three: copy one environment's rendering verbatim. That is the
+# supported shape, and it is supported because it is the only one that holds
+# without reasoning about it. A verbatim copy cannot widen a `Deny`, cannot pair
+# one environment's resources with another's tag condition, and refuses a
+# wrong-environment attempt at the first state read — before anything is
+# created — because `DenyOtherEnvironmentState` comes along with the rest.
+#
+# The union of two environments is available and is not a lazy option — a human
+# operator who may apply either environment from a laptop needs both — but it
+# has to be chosen rather than arrived at, and it must never be produced by
+# merging these documents statement by statement. A merge unions the `Deny`
+# statements too, and unioning `DenyOtherEnvironmentState` across both
+# environments denies every state key to the one role that is supposed to reach
+# all of them: explicit deny beats the allows beside it, so the result is a role
+# that initialises and then reads nothing. A correct union drops that statement
+# instead of merging it, which is a judgement no merge script makes on its own.
+# One was written on 2026-09-07 and produced exactly that document; it was
+# caught by reading the result, not by trusting the tool that built it.
 #
 # Edit any of these documents and re-sync every mirror of it in the same change,
 # not a follow-up one. A mirror that has fallen behind does not
