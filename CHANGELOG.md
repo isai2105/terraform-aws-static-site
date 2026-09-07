@@ -12,6 +12,27 @@ workflow mechanics and comment accuracy are not, and are left to git history.
 
 ### Changed
 
+- **Each apply role is now bounded to its own environment's resources, and the module must tag the
+  distribution and the certificate `Name = <name_prefix>-site-<env>-*` or the create is denied.**
+  `apply_infrastructure` is rendered once per entry in the bootstrap's `environments` list. Within
+  each rendering, the site bucket and its objects, the contract parameter path, the CloudFront
+  access log groups and the CloudFront function narrow from `<name_prefix>-site-*` to
+  `<name_prefix>-site-<env>-*`. CloudFront distributions and ACM certificates carry AWS-minted
+  identifiers and cannot be named in an ARN pattern, so they are bounded by tag instead:
+  `cloudfront:CreateDistribution` and `acm:RequestCertificate` require `aws:RequestTag/Name` to
+  match that pattern, and the distribution and certificate actions require `aws:ResourceTag/Name`
+  to match it. Untagging is refused for the `Name` key on both, so the tag cannot be stripped after
+  the fact to escape the condition.
+
+  **Upgrading:** hand-apply `bootstrap/` before applying an environment. The change is a
+  `PutRolePolicy` on existing roles — no role is replaced and no credential changes. Then, if you
+  supply your own module or have forked this one, confirm two things: that every resource it names
+  carries the environment segment, and that it sets a `Name` tag on both the distribution and the
+  certificate. A module that named resources `<name_prefix>-site-*` without the environment, or
+  that left the distribution untagged, applied successfully before and now fails at the first
+  create it reaches — in practice `s3:CreateBucket` or `cloudfront:CreateDistribution`, naming what
+  it tried to make.
+
 - **The apply roles now grant `iam:CreateRole` on one exact app-deploy-role ARN per environment
   instead of the wildcard `role/react-cloudfront-app-deploy-*`.** `ManageAppDeployRoleBounded` and
   `ManageAppDeployRoleUnbounded` are rendered once per entry in the bootstrap's `environments`
