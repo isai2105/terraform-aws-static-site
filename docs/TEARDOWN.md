@@ -613,6 +613,13 @@ same category of error as the 15–20 minute figure in section 3.
 
 ## 8. Tearing down the bootstrap
 
+**This section has never been executed.** The 2026-08-27 walk this document opens with covered the
+environments and stopped there, leaving the bootstrap standing; every step below is derived from
+the configuration and from documented AWS behaviour rather than from a run that produced it. It
+is marked unexecuted rather than presented as routine, for the reason section 7 gives — and it
+matters more here than it does there, because the failure section 7 warns about is fixed by
+re-running `terraform destroy`, and nothing below can be fixed that way.
+
 The state bucket, the OIDC provider and the app-deploy boundary policy are the only things in
 this design that outlive a cycle. This repository treats anything that survives a destroy as a
 defect; the bootstrap is the honest exception, and an exception is only honest if its removal

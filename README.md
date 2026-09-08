@@ -6,8 +6,9 @@ and its operating model is that every environment is applied, verified and destr
 same hour. There is no long-running demo environment, no drift detection and nothing on call.
 What is on offer instead is a lifecycle you can run yourself, in your own AWS account, from a
 fresh clone: `stage` and `prod` both stand up from zero, serve real traffic, and come down again
-leaving nothing behind — and a weekly CI job runs that whole lifecycle against `stage`, proving
-it still holds against whatever AWS and the pinned provider have become since the last run.
+leaving nothing behind — and a CI job runs that whole lifecycle against `stage` on demand,
+proving it still holds against whatever AWS and the pinned provider have become. Its weekly
+schedule is commented out, so that proof is only ever as recent as the last dispatch.
 `prod` runs the same code and is exercised by hand, for a reason the tradeoffs section gives.
 
 That constraint is what the rest of this repository is arranged around. Reproducibility from zero
@@ -57,7 +58,7 @@ apply — the app repository reads them at deploy time rather than remembering a
 The control plane, which is where most of the design actually lives:
 
 ```
-  bootstrap/            applied ONCE, by hand, on local state, with an elevated identity
+  bootstrap/            applied by hand, on local state, with an elevated identity
     ├── S3 state bucket (versioned, SSE, prevent_destroy)
     ├── GitHub Actions OIDC provider
     ├── <prefix>-ci-plan            trusted on  repo:<owner>@<id>/<repo>@<id>:pull_request
@@ -88,10 +89,10 @@ in its own repository; see the tradeoffs section for why it is not a third envir
 | `modules/static-site/examples/default/` | A caller that exists so `terraform validate` has a root through which to type-check a module declaring `configuration_aliases`. Deliberately excluded from terraform-docs. |
 | `envs/stage/`, `envs/prod/` | One module call each and nothing else — no resources, no conditionals. Three data sources are the one carve-out, and `main.tf` says why. `backend.hcl.example` is tracked; `backend.hcl` is gitignored because the state bucket name is per-account. |
 | `docs/BOOTSTRAP.md` | Standing the platform up: prerequisites, `terraform.tfvars`, the apply, the repository variables, the branch ruleset, the two GitHub Environments, the provider-lock token. |
-| `docs/TEARDOWN.md` | Taking it down: destroy order across the three layers, the measured CloudFront teardown, recovering an interrupted destroy, the eleven-row post-destroy orphan sweep, and the two-phase removal of the bootstrap's own `prevent_destroy` guard. |
+| `docs/TEARDOWN.md` | Taking it down: destroy order across the three layers, the measured CloudFront teardown, recovering an interrupted destroy, the eleven-row post-destroy orphan sweep, and the three-phase removal of the bootstrap's own `prevent_destroy` guard. |
 | `docs/DEPLOY_CONTRACT.md` | The interface `react-cloudfront-app` is written against: the deploy role and its trust subject, the SSM parameter names, the four-command upload sequence, and the CSP both repositories have to agree on. |
 | `Makefile` | Every check and every environment verb. `make help` lists them. CI invokes these targets rather than reimplementing them, so a local run and a green check are the same command. |
-| `.github/workflows/` | `validate.yml` (nine AWS-free jobs), `plan.yml` (a plan per environment a pull request changes), `apply.yml` (dispatch-only apply *or* destroy, gated on a GitHub Environment), `e2e.yml` (weekly full lifecycle against real AWS), `provider-lock-refresh.yml`. |
+| `.github/workflows/` | `validate.yml` (nine AWS-free jobs), `plan.yml` (a plan per environment a pull request changes), `apply.yml` (dispatch-only apply *or* destroy, gated on a GitHub Environment), `e2e.yml` (dispatch-only full lifecycle against real AWS, its weekly schedule commented out), `provider-lock-refresh.yml`. |
 
 ---
 
@@ -235,7 +236,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' "$SITE_URL/projects/x"   # 200 — a d
 ```
 
 The environment serves a seeded placeholder `index.html` from the first apply, so this works
-before anything has ever been deployed into it. `e2e.yml` asserts these weekly and more: the CSP
+before anything has ever been deployed into it. `e2e.yml` asserts these and more: the CSP
 read back from Terraform's own value, HSTS by shape, that the rewritten deep link still comes
 back `no-cache` under the *document's* policies, that an object under `/assets/` comes back
 `public, max-age=31536000, immutable`, and — the assertion the viewer-request function exists for
@@ -312,7 +313,7 @@ rows count 17 and the `prod` cycle above counts 23. The distribution is the cloc
 apply → verify → destroy → *bootstrap teardown* → empty account again is the one goal in this
 repository's operating model that nothing in CI asserts, because `e2e.yml` runs against an
 account that is already bootstrapped. The environment half of it has been measured repeatedly and
-the figures above are real; the bootstrap and its teardown have not been timed, and the two-phase
+the figures above are real; the bootstrap and its teardown have not been timed, and the three-phase
 `prevent_destroy` removal in particular is a documented procedure that has been reasoned about
 and never executed. This line stays here, undated, until someone walks it and dates it. An
 undated quickstart is a claim rather than a measurement, and saying so is cheaper than being
@@ -438,11 +439,10 @@ Specific ones, with what each buys and what it would cost to choose differently.
   comment syntax, and a payload you cannot paste is not a runbook step — ready for the day a
   second maintainer exists.
 
-- **`prod` is verified by hand and is deliberately outside the weekly end-to-end run.** Its
-  required-reviewer gate is incompatible with an unattended 04:17 Monday run, which would sit
-  waiting for an approval nobody is awake to give. `e2e.yml` therefore exercises `stage` only, and
-  takes no environment input at all so that the exclusion cannot be argued away one dispatch at a
-  time.
+- **`prod` is verified by hand and is deliberately outside the end-to-end run.** Its
+  required-reviewer gate is incompatible with an unattended run, which would sit waiting for an
+  approval nobody is watching for. `e2e.yml` therefore exercises `stage` only, and takes no
+  environment input at all so that the exclusion cannot be argued away one dispatch at a time.
 
 - **This repository provisions S3 and CloudFront only.** The VPC/ALB/EC2 architecture the original
   prototype demonstrated lives in its own repository rather than as a `sandbox` environment here.
