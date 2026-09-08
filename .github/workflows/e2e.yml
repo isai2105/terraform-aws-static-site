@@ -1443,6 +1443,7 @@ jobs:
       # which of the two failed is most of the diagnosis and the issue should
       # carry whichever got that far.
       - name: Re-run the destroy
+        id: destroy
         shell: bash
         run: |
           terraform -chdir="envs/${ENVIRONMENT}" destroy \
@@ -1467,6 +1468,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TEARDOWN: ${{ needs.lifecycle.outputs.teardown }}
+          DESTROY_OUTCOME: ${{ steps.destroy.outcome }}
         run: |
           body="${RUNNER_TEMP}/issue-body.md"
           log="${RUNNER_TEMP}/cleanup.log"
@@ -1487,6 +1489,16 @@ jobs:
 
           verdict="${TEARDOWN:-none recorded}"
 
+          # "Re-run the destroy" carries the default `if: success()` while this
+          # step fires on `always()`, so any earlier failure in this job leaves
+          # the retry skipped and this issue still filed. The empty-log guard
+          # below does not catch that: the init above already wrote the log and
+          # the destroy appends to it, so on that path the log is non-empty with
+          # init's output alone. Whether the destroy ran is therefore read off
+          # the step's own outcome, and only `success` or `failure` is a run —
+          # `skipped`, a cancelled job, and no entry at all are not.
+          retry="${DESTROY_OUTCOME:-none recorded}"
+
           {
             printf 'The end-to-end run on %s%s%s did not verify a clean teardown.\n\n' \
               "$tick" "$ENVIRONMENT" "$tick"
@@ -1498,8 +1510,14 @@ jobs:
               "$tick" "$tick"
             printf 'and found something left over. No verdict at all means it never reached\n'
             printf 'the check — a runner lost mid-destroy, or a verification step that failed\n'
-            printf 'on its own. Either way this job re-ran the destroy once, and its output\n'
-            printf 'is below.\n\n'
+            printf 'on its own.\n'
+            if [ "$DESTROY_OUTCOME" = success ] || [ "$DESTROY_OUTCOME" = failure ]; then
+              printf 'Either way this job re-ran the destroy once, and its output is below.\n\n'
+            else
+              printf 'This job did not re-run the destroy — retry step outcome: %s%s%s — so\n' \
+                "$tick" "$retry" "$tick"
+              printf 'nothing was destroyed here, and the log below is as far as the job got.\n\n'
+            fi
             printf '**What to do.** Work the post-destroy checklist in %sdocs/TEARDOWN.md%s\n' \
               "$tick" "$tick"
             printf 'section 6 — it covers the resources no tag query can see, which is most\n'
@@ -1507,7 +1525,7 @@ jobs:
               "$tick" "$tick"
             printf 'section 9.1 is the recovery, and it starts by confirming that no run is\n'
             printf 'actually in flight.\n\n'
-            printf '<details><summary>Cleanup destroy output</summary>\n\n'
+            printf '<details><summary>Cleanup job Terraform output</summary>\n\n'
             printf '%sterraform\n' "$fence"
             if [ ! -s "$log" ]; then
               printf 'No Terraform output was captured; the job failed before Terraform ran.\n'
