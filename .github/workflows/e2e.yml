@@ -1488,7 +1488,7 @@ jobs:
           verdict="${TEARDOWN:-none recorded}"
 
           {
-            printf 'The scheduled end-to-end run on %s%s%s did not verify a clean teardown.\n\n' \
+            printf 'The end-to-end run on %s%s%s did not verify a clean teardown.\n\n' \
               "$tick" "$ENVIRONMENT" "$tick"
             printf -- '- Run: %s\n' "$RUN_URL"
             printf -- '- Environment: %s%s%s\n' "$tick" "$ENVIRONMENT" "$tick"
