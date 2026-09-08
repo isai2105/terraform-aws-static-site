@@ -505,8 +505,9 @@ jobs:
               environment is applied, so both plan from empty state and a
               clean plan says the new provider builds the same resources from
               the same configuration. Whether the bump is inert against
-              resources that already exist is e2e.yml's weekly answer, not
-              this pull request's.
+              resources that already exist is e2e.yml's answer, not this pull
+              request's — and e2e.yml's schedule is commented out, so that
+              answer arrives only when somebody dispatches that workflow.
 
             Opened by `.github/workflows/provider-lock-refresh.yml`.
 
