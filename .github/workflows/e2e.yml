@@ -1512,19 +1512,35 @@ jobs:
             printf 'the check — a runner lost mid-destroy, or a verification step that failed\n'
             printf 'on its own.\n'
             if [ "$DESTROY_OUTCOME" = success ] || [ "$DESTROY_OUTCOME" = failure ]; then
-              printf 'Either way this job re-ran the destroy once, and its output is below.\n\n'
+              printf 'Either way this job re-ran the destroy once and its output is below —\n'
+              printf 'retry step outcome: %s%s%s.\n\n' "$tick" "$retry" "$tick"
             else
               printf 'This job did not re-run the destroy — retry step outcome: %s%s%s — so\n' \
                 "$tick" "$retry" "$tick"
               printf 'nothing was destroyed here, and the log below is as far as the job got.\n\n'
             fi
-            printf '**What to do.** Work the post-destroy checklist in %sdocs/TEARDOWN.md%s\n' \
+            # Destroy first, sweep second, and unconditionally. This job is
+            # reached on paths where the environment is still standing and still
+            # in state — a retry that failed, and one that never ran — as well as
+            # on the one where it came down, and section 6 is a leak hunt that
+            # presupposes the destroy: "run these after the last environment is
+            # destroyed". A second destroy against an empty state costs seconds;
+            # a leak hunt against a live environment reports the environment.
+            printf '**What to do.** Re-run the destroy before anything else, whatever the\n'
+            printf 'retry outcome above says. Against an empty state it is a no-op, and\n'
+            printf 'against a state a killed run left stale the refresh at the start of it is\n'
+            printf 'what reconciles it — reading that state by hand misreports exactly the\n'
+            printf 'resources you are trying to account for. %sdocs/TEARDOWN.md%s section 2\n' \
               "$tick" "$tick"
-            printf 'section 6 — it covers the resources no tag query can see, which is most\n'
-            printf 'of them. If the log below ends on a state lock, %sdocs/BOOTSTRAP.md%s\n' \
+            printf 'carries the unattended form, and section 5.3 the three-command recovery\n'
+            printf 'when a stranded lock is what stopped it — in which case Terraform has\n'
+            printf 'printed the lock id in the log below. %sdocs/BOOTSTRAP.md%s section 9.1 is\n' \
               "$tick" "$tick"
-            printf 'section 9.1 is the recovery, and it starts by confirming that no run is\n'
-            printf 'actually in flight.\n\n'
+            printf 'that same recovery, and it starts by confirming that no run is actually in\n'
+            printf 'flight. Only once a destroy has completed does the post-destroy checklist\n'
+            printf 'in %sdocs/TEARDOWN.md%s section 6 mean anything — it covers the resources\n' \
+              "$tick" "$tick"
+            printf 'no tag query can see, which is most of them.\n\n'
             printf '<details><summary>Cleanup job Terraform output</summary>\n\n'
             printf '%sterraform\n' "$fence"
             if [ ! -s "$log" ]; then
