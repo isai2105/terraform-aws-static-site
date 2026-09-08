@@ -95,14 +95,17 @@
 # resource that already exists, which is where a bump usually goes wrong.
 #
 # e2e.yml is the check that does exercise it. It applies `stage` for real,
-# smoke-tests it and destroys it, weekly, "against whatever AWS and the pinned
-# provider have become since the last run" — its words, and the provider is
-# pinned by the files this workflow rewrites. So the division to keep straight
-# is that plan.yml gates a bump on the configuration, the Tuesday slot below
-# puts the proposal a day after the run that last exercised the version being
-# moved away from, and the first time a new provider touches live resources is
-# in e2e.yml rather than in the pull request this file opens. Reading the plan
-# on #40 is worth doing and is not the same as having applied it.
+# smoke-tests it and destroys it, "against whatever AWS and the pinned provider
+# have become since the last run" — its words, and the provider is pinned by
+# the files this workflow rewrites. So the division to keep straight is that
+# plan.yml gates a bump on the configuration, and the first time a new provider
+# touches live resources is in e2e.yml rather than in the pull request this
+# file opens. e2e.yml's schedule is commented out, so that first time now waits
+# for somebody to dispatch it, and the Tuesday slot below — which puts the
+# proposal a day after the run that last exercised the version being moved away
+# from — is an ordering that holds again the moment that schedule is
+# uncommented. Reading the plan on #40 is worth doing and is not the same as
+# having applied it.
 #
 # Hence `PROVIDER_LOCK_TOKEN`, a fine-grained token with `contents: write` and
 # `pull-requests: write` scoped to this repository. docs/BOOTSTRAP.md section 8
@@ -131,17 +134,26 @@ on:
     # top of the hour is where the queue is longest, so `0 4 * * 2` buys a
     # delay and nothing else.
     #
-    # Not Monday because e2e.yml already runs then, at 04:17, and the two
-    # would meet at a state lock rather than politely. Opening this pull
-    # request starts a plan.yml run against every environment, and a plan
-    # takes each environment's state lock; e2e.yml applies, smoke-tests and
-    # destroys `stage` while holding stage's. Both of e2e.yml's jobs are
-    # bounded at 120 minutes — deliberately loose, so that they bound a wedged
-    # runner rather than a slow one — which means a Monday slot here would
-    # have to be picked against the timeout rather than against the observed
-    # runtime. A day's separation makes the overlap impossible instead of
-    # unlikely, and it puts this proposal a day after the end-to-end run that
-    # exercised what it proposes moving away from.
+    # Not Monday because that is the slot e2e.yml occupies whenever its
+    # schedule is enabled — 04:17 — and the two would meet at a state lock
+    # rather than politely. That schedule is commented out today, which makes
+    # the collision dormant rather than gone: e2e.yml keeps the commented
+    # `cron:` line beside the argument for switching it off, and calls
+    # re-enabling it a deliberate, reviewable edit rather than a settings
+    # toggle. So the argument that follows is kept rather than deleted — the
+    # collision comes back the moment somebody uncomments that line, and a
+    # Tuesday chosen against it does not have to be chosen again then.
+    #
+    # Opening this pull request starts a plan.yml run against every
+    # environment, and a plan takes each environment's state lock; e2e.yml
+    # applies, smoke-tests and destroys `stage` while holding stage's. Both of
+    # e2e.yml's jobs are bounded at 120 minutes — deliberately loose, so that
+    # they bound a wedged runner rather than a slow one — which means a Monday
+    # slot here would have to be picked against the timeout rather than against
+    # the observed runtime. A day's separation makes the overlap impossible
+    # instead of unlikely, and once that schedule is back it puts this proposal
+    # a day after the end-to-end run that exercised what it proposes moving
+    # away from.
     #
     # A scheduled workflow is disabled automatically after 60 days without
     # repository activity, which matters more here than anywhere: a refresh

@@ -86,13 +86,19 @@ updates:
 
     schedule:
       interval: "weekly"
-      # Tuesday, and not the Monday e2e.yml already occupies. The ordering is
-      # the argument: e2e.yml applies and destroys `stage` on Monday at 04:17
-      # UTC against whatever `main` currently locks, and both bump proposals
-      # arrive the morning after — so what they propose moving away from was
-      # exercised end to end a day earlier rather than a week earlier. Early
-      # in the week for e2e.yml's stated reason: a failure gets the week to be
-      # dealt with rather than a weekend to sit through.
+      # Tuesday, and not the Monday e2e.yml occupies whenever its schedule is
+      # enabled. The ordering is the argument: with that schedule live,
+      # e2e.yml applies and destroys `stage` on Monday at 04:17 UTC against
+      # whatever `main` currently locks, and both bump proposals arrive the
+      # morning after — so what they propose moving away from was exercised
+      # end to end a day earlier rather than a week earlier. That cron is
+      # commented out today, so neither half of it holds: nothing occupies
+      # Monday, and nothing produces the day-earlier evidence either. Tuesday
+      # stays regardless, because e2e.yml keeps that cron as an edit somebody
+      # can uncomment rather than a setting somebody can toggle: the collision
+      # comes back with it, and a slot moved now is a slot to move back then.
+      # Early in the week for e2e.yml's stated reason: a failure gets the week
+      # to be dealt with rather than a weekend to sit through.
       #
       # This is the same minute provider-lock-refresh.yml is scheduled for,
       # and that is deliberate rather than an oversight, because the two

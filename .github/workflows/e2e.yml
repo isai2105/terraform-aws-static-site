@@ -7,10 +7,11 @@
 # it, TFLint and Trivy read it statically, `terraform test` plans it against a
 # provider that cannot reach AWS, and plan.yml refreshes real state without
 # changing it. None of them can say whether the thing this repository describes
-# still works, because none of them ever creates it. This one does, weekly,
-# against whatever AWS and the pinned provider have become since the last run —
-# which is what makes "reference implementation" a claim somebody checks rather
-# than a word in a README.
+# still works, because none of them ever creates it. This one does, against
+# whatever AWS and the pinned provider have become since the last run — which is
+# what makes "reference implementation" a claim somebody checks rather than a
+# word in a README. The weekly schedule that used to run it is commented out
+# below, so it now checks that claim only when somebody dispatches it.
 #
 # It replaces drift detection, which would be meaningless here: nothing in this
 # repository stays deployed, so there is no standing infrastructure to drift.
@@ -36,9 +37,9 @@
 # The apply and the destroy are `-auto-approve` here, and apply.yml's two-job
 # split — plan to an artefact, then apply *that* — is deliberately not repeated.
 # That split exists to put a reviewed plan in front of a human before anything
-# changes. There is no human on a 04:17 Monday run, and nothing to review: this
-# workflow's whole purpose is that the apply and the destroy happen unattended.
-# Copying the shape without the reviewer would be ceremony.
+# changes. There is no human watching once this is dispatched, and nothing to
+# review: this workflow's whole purpose is that the apply and the destroy happen
+# unattended. Copying the shape without the reviewer would be ceremony.
 #
 # ---------------------------------------------------------------------------
 # How this file authenticates
@@ -79,7 +80,7 @@
 # `static-site` with different variable values, not with different resources, so
 # a matrix over both environments would apply the same Terraform twice under a
 # second name and prove nothing the first apply did not — at the cost of a
-# second CloudFront teardown on every scheduled run.
+# second CloudFront teardown on every run.
 #
 # `prod` is the wrong one to pick even if only one is run. Its Environment
 # carries a required reviewer, and the apply role is trusted on the
@@ -107,7 +108,7 @@
 # free.
 #
 # None of that weakens the case for the job. Its justification is that an
-# unattended weekly destroy can fail silently, which is true at any frequency: a
+# unattended destroy can fail silently, which is true at any frequency: a
 # CloudFront distribution can sit in a real account for a week with nobody
 # looking, and in a repository whose stated goal is complete, verifiable
 # teardown that is the worst thing to leave to chance. A rarer failure on a
@@ -168,7 +169,7 @@
 # with which of them the `zizmor` job there enforces and which are held by hand.
 # That list was written out before this file existed and names it: the only file
 # in the repository that holds an apply role with nobody watching, destroying
-# real infrastructure on a schedule. Which makes it the last place to break the
+# real infrastructure unattended. Which makes it the last place to break the
 # list. Both timeouts below are larger than validate.yml's fifteen minutes and
 # are argued where they sit.
 
@@ -213,8 +214,8 @@ permissions: {}
 #
 # It serialises this workflow against itself. It deliberately does **not** join
 # apply.yml's `apply-stage` group: those two meet at the state lock instead,
-# the way plan.yml and apply.yml already do, and a scheduled run that has to
-# wait for a lock reports the wait rather than being cancelled by it.
+# the way plan.yml and apply.yml already do, and a run that has to wait for a
+# lock reports the wait rather than being cancelled by it.
 #
 # `cancel-in-progress: false` for the reason apply.yml gives and one more of its
 # own. Cancelling an apply strands the state lock and leaves the infrastructure
@@ -450,7 +451,7 @@ jobs:
       # happens with the step skipped, for no gain. What the `always()` did buy
       # was cost — `::error::` annotations asserting a module bug ("the site
       # bucket carries no Project tag") printed beside the real apply failure in
-      # an unattended workflow somebody reads on a Monday, an
+      # an unattended workflow somebody reads long after the fact, an
       # `aws s3api get-bucket-tagging` against a bucket that may not exist, and
       # the whole step running on cancelled runs too.
       #
@@ -715,7 +716,7 @@ jobs:
             --no-progress
 
       # One step rather than one per assertion, and it accumulates rather than
-      # stopping at the first failure. On a weekly unattended run the useful
+      # stopping at the first failure. On an unattended run the useful
       # artefact is a complete picture — every assertion's verdict from one
       # cycle — not the first thing that went wrong followed by six skipped
       # steps that would have said what else did. Each failure is also emitted
@@ -1453,8 +1454,7 @@ jobs:
 
       # `if: always()`, so a second failed destroy still gets reported. This is
       # the step the whole job exists for: without it a failed unattended
-      # teardown is a red square in a history nobody is watching on a Monday
-      # morning.
+      # teardown is a red square in a history nobody is watching.
       #
       # `gh issue create --label`, never `gh api …/issues` — see the header, and
       # docs/BOOTSTRAP.md section 7.5 for the source references behind it. The

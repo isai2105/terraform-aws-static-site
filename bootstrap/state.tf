@@ -4,9 +4,9 @@
 # local state. It is the root that creates the bucket remote state lives in, so
 # there is nowhere to put remote state until it has already run; making it
 # self-hosting would be a circular dependency dressed up as consistency. The
-# state file is small and this root is applied once, so the cost is a file the
-# runbook tells the cloner to keep — and losing it means adopting this bucket
-# back in by hand.
+# state file is small and this root is never applied by CI, so the cost is a
+# file the runbook tells the cloner to keep — and losing it means adopting this
+# bucket back in by hand.
 #
 # Keeping that file also keeps the bucket's name stable: the uniqueness suffix
 # below is generated once and then remembered by state, and nowhere else.
@@ -39,7 +39,7 @@ locals {
 #
 # What the check would have this root do instead is create a second bucket to
 # receive the logs. That bucket trips this same rule on itself, has to be
-# emptied before the two-phase teardown in docs/TEARDOWN.md can remove
+# emptied before the three-phase teardown in docs/TEARDOWN.md can remove
 # anything, and adds a third resource to the short list of things that outlive
 # a destroy — in exchange for a lower-fidelity copy of a record CloudTrail
 # already holds.
@@ -49,7 +49,7 @@ resource "aws_s3_bucket" "state" {
 
   # `force_destroy` is deliberately left at its default of false. This bucket is
   # the one thing in the design that is meant to outlive a destroy: emptying it
-  # is a step in the documented two-phase teardown in docs/TEARDOWN.md, not a
+  # is a step in the documented three-phase teardown in docs/TEARDOWN.md, not a
   # thing an errant `terraform destroy` should be able to do on its own.
 
   lifecycle {

@@ -5,20 +5,27 @@ this repository keeps its state in, the GitHub Actions OIDC provider, and the ro
 one read-only plan role, and one apply role per environment — the things that have to exist
 before any environment can be applied at all.
 
-It is applied **once, by hand, on local state**, and it is the only root in this repository
-ever applied with an elevated AWS identity. Everything afterwards runs through the roles it
-creates, from a workflow, with no long-lived access key anywhere.
+It is applied **by hand, on local state, never from CI**, and it is the only root in this
+repository ever applied with an elevated AWS identity. Everything afterwards runs through the
+roles it creates, from a workflow, with no long-lived access key anywhere.
 
 This document is written for a stranger with an empty AWS account. Follow it top to bottom.
 
-> **This runbook has not been walked end to end.** Nothing in this repository has been applied
-> against a real AWS account yet, so the procedure below is derived from the configuration
-> rather than from a run that produced it. The from-zero path — empty account, fresh clone,
-> bootstrap, apply, verify, destroy, and the bootstrap teardown itself — will be walked in one
-> pass and dated in the README. Until that date is there, treat the AWS-side steps as reviewed
-> but unexecuted, and expect the apply role's policy in particular to be missing an action or
-> two: it was derived service by service from what this repository creates, and its intended
-> failure mode is a named `AccessDenied` rather than a wildcard that never fails.
+> **The bootstrap has been applied against a real AWS account, repeatedly.** `docs/TEARDOWN.md`
+> assumes this runbook has already been followed, and the walk it records on 2026-08-27 — both
+> environments applied from zero, verified against live HTTP responses and destroyed — ran
+> against the state bucket this root creates. Every narrowing of the apply roles since has been
+> another hand-apply of this root, which is the upgrade step the CHANGELOG names. Each narrowing
+> is also a fresh chance to have cut an action this repository needs, and that failure arrives as
+> a named `AccessDenied` on the thing it was reaching for: the policy is derived service by
+> service from what this repository creates, rather than written as a wildcard that never fails.
+>
+> **What has not happened is the timing and the teardown.** No run of the apply has been
+> stopwatched, which is why the README's timing table records the bootstrap as *not timed*
+> rather than quoting a figure. Section 10's teardown — `docs/TEARDOWN.md` section 8 — has never
+> been run at all, and that section says so where a reader meets it. The from-zero path in one
+> pass, empty account through bootstrap, apply, verify, destroy and the bootstrap teardown back
+> to empty, is still unwalked, and the README keeps the line undated until someone walks it.
 
 ## Why there are no values in this runbook
 
@@ -721,7 +728,7 @@ the state file cannot be trusted to say what that run removed.
 ### 9.2 Everything else
 
 Teardown lives in `docs/TEARDOWN.md` — the destroy order across the three layers, the measured
-CloudFront teardown duration, the post-destroy orphan checklist, and the two-phase removal of
+CloudFront teardown duration, the post-destroy orphan checklist, and the three-phase removal of
 this root's own `prevent_destroy` guard. This file covers standing the platform up.
 
 ## 10. Tearing down the bootstrap
