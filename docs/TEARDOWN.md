@@ -13,13 +13,15 @@ already been followed. Follow it top to bottom.
 > **This procedure was walked end to end on 2026-08-27, against a real AWS account.** Both
 > environments were applied from zero (17 resources each), verified against live HTTP responses,
 > and destroyed; one of those destroys was killed mid-flight and recovered, which is why
-> section 5 exists in the shape it does. **Every duration below is a wall-clock measurement from
-> that day, not a figure quoted from somewhere else** — and section 3 records what happened to
-> the figure this repository used to quote. Where something was never exercised, it says so
-> rather than reading as though it was.
+> section 5 exists in the shape it does. **Every duration below is a wall-clock measurement, from
+> that day unless it carries a later date, and not a figure quoted from somewhere else** — a
+> second hand walk on 2026-09-08 added the figures in sections 3 and 8 — and section 3 records
+> what happened to the figure this repository used to quote. Where something was never
+> exercised, it says so rather than reading as though it was.
 >
-> Measured on Terraform 1.15.9 and AWS provider 6.61.0, with the environments in one region and
-> the us-east-1 resources CloudFront forces, in a single AWS account, on a single day.
+> That day was measured on Terraform 1.15.9 and AWS provider 6.61.0, with the environments in
+> one region and the us-east-1 resources CloudFront forces, in a single AWS account, on a single
+> day; 3.2 says what the 2026-09-08 figures were measured on.
 
 ## Why there are no values in this runbook
 
@@ -154,6 +156,23 @@ no delivery source (3m10s), so the delivery chain costs nothing. And the distrib
 served real viewer traffic through a full verification run was the fastest of the three, so
 neither age nor edge state shows any effect.
 
+**A second data point, 2026-09-08.** A one-pass from-zero walk timed a `stage` cycle again, on
+the same account and region pair, against the module's current 23-resource shape:
+
+| Event | Environment | Wall clock |
+|---|---|---|
+| create | stage (complete, 23 resources) | **3m02s** |
+| destroy | stage (complete, 23 resources) | **3m15s** |
+
+Two operations, **one run each**, and neither distribution was polled independently, so they
+carry no phase breakdown of the kind 3.1 records: they corroborate the three-minute rule at a
+larger resource count rather than refining it. Both ran as `terraform apply` / `terraform
+destroy -auto-approve` rather than through `make apply-stage` / `make destroy-stage`, and only
+against `stage`. The gaps against that day's 2m53s and 3m01s are nine and fourteen seconds, which
+is the same order as the spread between that day's own three distributions — so they are not
+evidence that the six extra resources cost anything, and the finding is the one already above:
+the distribution is the clock.
+
 ### 3.1 Where the three minutes actually goes
 
 Terraform deletes a distribution in three steps: `UpdateDistribution(Enabled=false)`, then poll
@@ -194,8 +213,11 @@ Three things follow, and none of them survive the old figure:
 
 ### 3.2 What the figure is, and is not, evidence of
 
-All of it is one account, one day, one region pair, one provider version and one Terraform
-version. It is a measurement, not a service level. Anyone re-measuring should date their number
+All of it is one account and one region pair. The six timed operations above are one day, on
+Terraform 1.15.9 and AWS provider 6.61.0; the 2026-09-08 pair is a second day, on the same
+account and by the same hand, from a fresh clone of commit 08a6aba, and its toolchain is that
+commit's pins rather than a version anybody wrote down at the time. It is a measurement, not a
+service level. Anyone re-measuring should date their number
 the way this section dates its own — the failure being corrected here is not that 15–20 minutes
 went stale, it is that nobody could tell, because it arrived without a date or a method
 attached.
@@ -400,9 +422,14 @@ rest of the reasoning, including the two things a pass does not prove.
 
 The "Found" column is what this checklist returned on 2026-08-27, run twice — after the two-pass
 teardown across a `force-unlock`, and after the clean prod destroy. **Identical both times.** One
-row carries no measurement and says so: the viewer-request function arrived after that day, so
-its check is written from the same reasoning as the others and has never been run. A blank in a
-column of results is worth more than a number copied from the row above it.
+row carries no measurement from that day and says so: the viewer-request function arrived after
+it, so its check is written from the same reasoning as the others. It has run since —
+`make verify-teardown` in the 2026-09-08 walk section 8 records returned every row clean,
+including that one, in 11s — which establishes that the check executes and finds nothing on an
+account with nothing to find. It does not answer 6.1's question, which is whether a *leaked*
+function would be visible to the tag inventory at all, and no clean sweep ever can. The column
+below is still 2026-08-27's, and a blank in a column of results is worth more than a number
+copied from the row above it.
 
 | # | Check | Why it is on the list | Found |
 |---|---|---|---|
@@ -613,12 +640,33 @@ same category of error as the 15–20 minute figure in section 3.
 
 ## 8. Tearing down the bootstrap
 
-**This section has never been executed.** The 2026-08-27 walk this document opens with covered the
-environments and stopped there, leaving the bootstrap standing; every step below is derived from
-the configuration and from documented AWS behaviour rather than from a run that produced it. It
-is marked unexecuted rather than presented as routine, for the reason section 7 gives — and it
-matters more here than it does there, because the failure section 7 warns about is fixed by
-re-running `terraform destroy`, and nothing below can be fixed that way.
+**This section was executed twice on 2026-09-08, against a real AWS account, and nothing about
+that makes it routine.** Until that day it had never been run: the 2026-08-27 walk this document
+opens with covered the environments and stopped there, leaving the bootstrap standing, and every
+step below was derived from the configuration and from documented AWS behaviour rather than from
+a run that produced it. Both 2026-09-08 runs were driven by hand with an elevated identity
+against local bootstrap state — the only way this root is ever operated — one before a from-zero
+walk to return an already-bootstrapped account to empty, one after it. What they produced:
+
+- **Phase 0** returned empty lists both times, which is what a correctly ordered teardown should
+  produce. It has never been observed catching a boundary still attached, so nothing here is
+  evidence that it would.
+- **Phase 1** removed **101 object versions and 60 delete markers** on the first run, from a
+  bucket that had carried this repository's CI for weeks, and **6 versions and 2 delete markers**
+  on the second, immediately after a single environment cycle. The loops are why both are
+  clearable in one pass; an `aws s3 rm --recursive` would have removed neither.
+- **Phase 2** destroyed **21 resources in 12s** on the first run and **11s** on the second, and
+  both `prevent_destroy` hand-edits were reverted with `git checkout -- bootstrap/state.tf`
+  immediately afterwards, leaving the tracked tree clean.
+- **Phases 0 and 1 together took 12s** on the second run. They were not timed separately on the
+  first, where phase 1 had far more to clear — so read 12s as the floor for an account that has
+  just run one cycle, not as a figure that holds for a bucket with months of history in it.
+
+Two runs on one account on one day is provenance, not a guarantee, and the reason section 7 gives
+for marking thin evidence as thin applies here with more force than it does there: the failure
+section 7 warns about is fixed by re-running `terraform destroy`, and nothing below can be fixed
+that way. Read every ordering warning that follows as though the section were still unexecuted,
+because a second operator on a different account is in exactly that position.
 
 The state bucket, the OIDC provider and the app-deploy boundary policy are the only things in
 this design that outlive a cycle. This repository treats anything that survives a destroy as a
@@ -714,11 +762,21 @@ intended to. The friction is the guard: it is what stops an accidental `destroy`
 state with it. Run `git status` afterwards and confirm the working tree is clean.
 
 The bootstrap runs on local state, so `bootstrap/terraform.tfstate` is what this destroy reads.
-If it is missing, the bucket, the provider, the app-deploy boundary policy and every role have
-to be adopted back in one `terraform import` at a time first — the plan role plus one apply role
-per name in `environments`, which is three at the two environments this repository ships and
+If it is missing there are two ways back, and this runbook used to name only one. Adopting the
+resources back in one `terraform import` at a time is the first — the plan role plus one apply
+role per name in `environments`, which is three at the two environments this repository ships and
 grows with the list, not the two the older shape had. The boundary policy is easy to miss in
-that count: it is the only customer-managed policy in the bootstrap root.
+that count: it is the only customer-managed policy in the bootstrap root. The second, available
+whenever no environment is standing, is to remove those same objects by hand and apply the
+bootstrap again from zero. The count is smaller than the import path's: this root's twenty-one
+managed resources resolve to six AWS objects, because the bucket's six sub-configurations go with
+the bucket, the eight inline policies go with their roles, and `random_id.state_bucket_suffix`
+has no AWS object at all. Neither path is free and the trade is legible: an import returns the
+same bucket name, so nothing downstream is repointed, while a re-apply mints a new suffix and
+costs what the paragraph at the end of this section describes. Whichever you take, the phases
+above read the bucket and the boundary names from `terraform output`, which is the state that has
+gone — compose the boundary name from `name_prefix` in `bootstrap/terraform.tfvars`, and recover
+the bucket name with `aws s3api list-buckets`, or phase 0 dead-ends on its first line.
 `docs/BOOTSTRAP.md` section 4 explains why that file is worth keeping.
 
 If you imported a pre-existing OIDC provider rather than creating one — `docs/BOOTSTRAP.md`
@@ -730,6 +788,16 @@ terraform -chdir=bootstrap state rm aws_iam_openid_connect_provider.github
 
 An account holds exactly one provider per issuer URL, so destroying one you did not create takes
 GitHub OIDC away from everything else in the account that uses it.
+
+**If you bootstrap the account again afterwards, the state bucket comes back under a different
+name, and nothing else does.** Its `random_id` suffix is re-minted exactly as an environment's
+is — observed across the two teardowns and two applies of 2026-09-08, where the suffix took three
+distinct values in one day — so `envs/*/backend.hcl` and the `TF_STATE_BUCKET` repository
+variable both point at a bucket that no longer exists until they are re-read from
+`terraform -chdir=bootstrap output backend_init_command` and `repository_variable_commands`.
+Every other identifier came back byte-identical that day: the plan and apply role names, the OIDC
+provider ARN and the boundary policy name all derive from `name_prefix` and the issuer URL rather
+than from the suffix, so nothing scoped against them needs re-editing.
 
 ## 9. Things that look like failures and are not
 

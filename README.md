@@ -291,33 +291,36 @@ not a service level.
 
 | Step | Wall clock | Source |
 |---|---|---|
-| `terraform -chdir=bootstrap apply` | **not timed** | Creates only S3 and IAM resources, none of which has a propagation wait — but no run of it has been stopwatched, so no figure is quoted. |
+| `terraform -chdir=bootstrap apply` | **70s** | 21 managed resources, 2026-09-08, us-east-2, from a fresh clone into an account holding none of this repository's resources — it creates only S3 and IAM resources, none of which has a propagation wait. Run twice that day: the re-apply that put CI back afterwards took **65s**. |
 | GitHub configuration (`docs/BOOTSTRAP.md` §6–7) | **not timed** | Roughly a dozen `gh` calls, done once. |
 | `make apply-stage` | **~3 min** | A 17-resource environment applied in **2m53s** / **2m54s** on 2026-08-27, of which the distribution alone was 2m43s (`docs/TEARDOWN.md` §3). Distribution creation was **3m14s** on 2026-09-01 — **single run**, see below. |
 | Verify with `curl` | seconds | — |
 | `make destroy-stage` | **~3 min** | A 17-resource environment destroyed in **3m01s** on 2026-08-27, of which the distribution was **2m48s** — the ~93% above. Within that distribution phase, **2m32s** (~98% of it, timed against AWS rather than against Terraform) is propagating `Enabled=false` to every edge, and the `DeleteDistribution` call itself is ~3s (`docs/TEARDOWN.md` §3.1). |
 | One full `prod` cycle: `init` + `plan` + `apply` + verify + `destroy` | **8m50s** | 2026-09-01, 22:08:40Z → 22:17:30Z, 23 resources, us-east-2 — **single run**, see below. |
-| Post-destroy sweep (`docs/TEARDOWN.md` §6) | **not timed** | Eleven read-only AWS CLI checks. |
-| Bootstrap teardown (`docs/TEARDOWN.md` §8) | **never walked end to end** | See below. |
+| Post-destroy sweep (`docs/TEARDOWN.md` §6) | **11s** | Eleven read-only AWS CLI checks, run as `make verify-teardown`: all 16 of its output rows clean and both 20-per-account CloudFront quota counters reading 0, on 2026-09-08 — **single run**, see below. |
+| Bootstrap teardown (`docs/TEARDOWN.md` §8) | **12s** + **11s** | Phases 0–1 in 12s, phase 2's `terraform -chdir=bootstrap destroy` in 11s for 21 resources, 2026-09-08. Executed twice that day; the other run's phase 2 took **12s**, and its phase 1 had 101 object versions and 60 delete markers to clear rather than 6 and 2. |
 
-**Two of those figures are marked *single run* because that is all they are.** The 3m14s
+**Three of those figures are marked *single run* because that is all they are.** The 3m14s
 distribution create and the 8m50s `prod` cycle were each measured once, on 2026-09-01, while this
 README was being written; neither was cross-checked against a second run, and neither is recorded
-in any artefact in this repository. The 2026-08-27 numbers are a different class of thing: six
-timed operations across three distributions, with their method and their limits written down in
+in any artefact in this repository. The 11s sweep is the third, measured once on 2026-09-08 in
+the walk described below. The bootstrap apply and the bootstrap teardown on that day were each
+run twice — better than once, and still one account, one day and one hand at the keyboard. The
+2026-08-27 numbers are a different class of thing: six timed operations across three
+distributions, with their method and their limits written down in
 `docs/TEARDOWN.md` §3. They describe the 17-resource shape the environment had that day; the
 module has gained resources since — the viewer-request function among them — which is why those
 rows count 17 and the `prod` cycle above counts 23. The distribution is the clock in both.
 
-**The from-zero path has not been walked in one pass.** Empty account → fresh clone → bootstrap →
-apply → verify → destroy → *bootstrap teardown* → empty account again is the one goal in this
-repository's operating model that nothing in CI asserts, because `e2e.yml` runs against an
-account that is already bootstrapped. The environment half of it has been measured repeatedly and
-the figures above are real; the bootstrap and its teardown have not been timed, and the three-phase
-`prevent_destroy` removal in particular is a documented procedure that has been reasoned about
-and never executed. This line stays here, undated, until someone walks it and dates it. An
-undated quickstart is a claim rather than a measurement, and saying so is cheaper than being
-found out.
+**The from-zero path was walked in one pass on 2026-09-08, in 11m14s.** Empty account → fresh
+clone → bootstrap → apply → verify → destroy → *bootstrap teardown* → empty account again, by
+hand against a real account, and the bootstrap, sweep and bootstrap-teardown rows above are that
+day's. It is still the one goal in this repository's operating model that nothing in CI asserts,
+because `e2e.yml` runs against an account that is already bootstrapped — and one walk on one day
+is evidence rather than a standing guarantee, the more so for what it skipped: `stage` only,
+`terraform apply`/`destroy -auto-approve` rather than the `make` targets that refuse
+`-auto-approve`, no walk of `docs/BOOTSTRAP.md` §6–7, and "empty account" meaning empty of *this
+repository's* resources beside pre-existing infrastructure that was never touched.
 
 ### What one cycle costs
 
