@@ -20,12 +20,23 @@ This document is written for a stranger with an empty AWS account. Follow it top
 > a named `AccessDenied` on the thing it was reaching for: the policy is derived service by
 > service from what this repository creates, rather than written as a wildcard that never fails.
 >
-> **What has not happened is the timing and the teardown.** No run of the apply has been
-> stopwatched, which is why the README's timing table records the bootstrap as *not timed*
-> rather than quoting a figure. Section 10's teardown — `docs/TEARDOWN.md` section 8 — has never
-> been run at all, and that section says so where a reader meets it. The from-zero path in one
-> pass, empty account through bootstrap, apply, verify, destroy and the bootstrap teardown back
-> to empty, is still unwalked, and the README keeps the line undated until someone walks it.
+> **The timing and the teardown happened on 2026-09-08.** A hand walk that day timed this root's
+> apply at **70s** for 21 managed resources, and the re-apply that put CI back afterwards at
+> **65s**, which is what the README's timing table now quotes instead of *not timed*. Section
+> 10's teardown — `docs/TEARDOWN.md` section 8 — was executed twice the same day; section 8
+> records what each phase did, and still tells a first-time operator to read its ordering
+> warnings as though it never had. The from-zero path in one pass, empty account through
+> bootstrap, apply, verify, destroy and the bootstrap teardown back to empty, took **11m14s** —
+> a **single run**, and dated for that reason.
+>
+> **What that walk did not cover is most of this document.** Sections 6 and 7 — the repository
+> variables, the ruleset, the GitHub Environments — were not walked at all, which is why the
+> README still records GitHub configuration as *not timed*. The environment half ran `terraform
+> apply` / `terraform destroy -auto-approve` rather than the `make` targets, whose interactive
+> confirmation stays unexercised; it applied `stage` and never `prod`; and "empty account" means
+> empty of *this repository's* resources, beside unrelated infrastructure in the same account
+> that was not touched. One walk, one day, one account, one hand — enough to date the claims
+> above, and not enough to make any of them routine.
 
 ## Why there are no values in this runbook
 
@@ -139,14 +150,14 @@ deliberately not self-hosting — it is the root that creates the bucket remote 
 so there is nowhere to put remote state until it has already run.
 
 That file is also the only place the state bucket's `random_id` suffix is remembered. Lose it
-and the bucket, the provider, the app-deploy boundary policy and every role have to be adopted
-back in one `terraform import` at a time, against a bucket name you can only recover by listing
-the account. Count the roles before you start: it is the plan role plus **one apply role per
-name in `environments`**, so a recovery that imports the bucket, the provider and two roles is
-short by one for every environment past the first, and finds out at the next apply with an
-`EntityAlreadyExists` on a role it never imported. The boundary policy is the same trap in a
-resource nobody thinks to count, because it is the only customer-managed policy in the
-bootstrap root.
+and one recovery is adopting the bucket, the provider, the app-deploy boundary policy and every
+role back in one `terraform import` at a time, against a bucket name you can only recover by
+listing the account; `docs/TEARDOWN.md` section 8 names the other. Count the roles before you
+start: it is the plan role plus **one apply role per name in `environments`**, so a recovery
+that imports the bucket, the provider and two roles is short by one for every environment past
+the first, and finds out at the next apply with an `EntityAlreadyExists` on a role it never
+imported. The boundary policy is the same trap in a resource nobody thinks to count, because it
+is the only customer-managed policy in the bootstrap root.
 
 Back it up somewhere outside the working copy.
 
