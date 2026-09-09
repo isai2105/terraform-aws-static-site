@@ -150,14 +150,14 @@ deliberately not self-hosting — it is the root that creates the bucket remote 
 so there is nowhere to put remote state until it has already run.
 
 That file is also the only place the state bucket's `random_id` suffix is remembered. Lose it
-and the bucket, the provider, the app-deploy boundary policy and every role have to be adopted
-back in one `terraform import` at a time, against a bucket name you can only recover by listing
-the account. Count the roles before you start: it is the plan role plus **one apply role per
-name in `environments`**, so a recovery that imports the bucket, the provider and two roles is
-short by one for every environment past the first, and finds out at the next apply with an
-`EntityAlreadyExists` on a role it never imported. The boundary policy is the same trap in a
-resource nobody thinks to count, because it is the only customer-managed policy in the
-bootstrap root.
+and one recovery is adopting the bucket, the provider, the app-deploy boundary policy and every
+role back in one `terraform import` at a time, against a bucket name you can only recover by
+listing the account; `docs/TEARDOWN.md` section 8 names the other. Count the roles before you
+start: it is the plan role plus **one apply role per name in `environments`**, so a recovery
+that imports the bucket, the provider and two roles is short by one for every environment past
+the first, and finds out at the next apply with an `EntityAlreadyExists` on a role it never
+imported. The boundary policy is the same trap in a resource nobody thinks to count, because it
+is the only customer-managed policy in the bootstrap root.
 
 Back it up somewhere outside the working copy.
 
