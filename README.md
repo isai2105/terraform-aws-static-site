@@ -92,7 +92,7 @@ in its own repository; see the tradeoffs section for why it is not a third envir
 | `docs/TEARDOWN.md` | Taking it down: destroy order across the three layers, the measured CloudFront teardown, recovering an interrupted destroy, the eleven-row post-destroy orphan sweep, and the three-phase removal of the bootstrap's own `prevent_destroy` guard. |
 | `docs/DEPLOY_CONTRACT.md` | The interface `react-cloudfront-app` is written against: the deploy role and its trust subject, the SSM parameter names, the four-command upload sequence, and the CSP both repositories have to agree on. |
 | `Makefile` | Every check and every environment verb. `make help` lists them. CI invokes these targets rather than reimplementing them, so a local run and a green check are the same command. |
-| `.github/workflows/` | `validate.yml` (nine AWS-free jobs), `plan.yml` (a plan per environment a pull request changes), `apply.yml` (dispatch-only apply *or* destroy, gated on a GitHub Environment), `e2e.yml` (dispatch-only full lifecycle against real AWS, its weekly schedule commented out), `provider-lock-refresh.yml`. |
+| `.github/workflows/` | `validate.yml` (nine AWS-free jobs), `plan.yml` (a plan per environment a pull request changes), `apply.yml` (dispatch-only apply *or* destroy, gated on a GitHub Environment), `e2e.yml` (dispatch-only full lifecycle against real AWS, its weekly schedule commented out), `provider-lock-refresh.yml` (monthly, plus on demand: re-resolves all five committed lock files and opens the result as a pull request). |
 
 ---
 

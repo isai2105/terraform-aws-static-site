@@ -101,11 +101,12 @@
 # plan.yml gates a bump on the configuration, and the first time a new provider
 # touches live resources is in e2e.yml rather than in the pull request this
 # file opens. e2e.yml's schedule is commented out, so that first time now waits
-# for somebody to dispatch it, and the Tuesday slot below — which puts the
-# proposal a day after the run that last exercised the version being moved away
-# from — is an ordering that holds again the moment that schedule is
-# uncommented. Reading the plan on #40 is worth doing and is not the same as
-# having applied it.
+# for somebody to dispatch it. The weekly Tuesday slot this file used to carry
+# also bought an ordering — the proposal landing the morning after the run that
+# last exercised the version being moved away from — and the monthly slot below
+# cannot buy it back, because a day-of-month cron has no weekday. That is
+# argued where the `cron:` line is rather than here. Reading the plan on #40 is
+# worth doing and is not the same as having applied it.
 #
 # Hence `PROVIDER_LOCK_TOKEN`, a fine-grained token with `contents: write` and
 # `pull-requests: write` scoped to this repository. docs/BOOTSTRAP.md section 8
@@ -128,39 +129,91 @@ name: provider-lock-refresh
 
 on:
   schedule:
-    # Tuesday morning UTC, off the hour, and deliberately not Monday.
+    # Monthly, on the 3rd at 04:23 UTC, and the day of the week is no longer
+    # chosen. This replaces a weekly `23 4 * * 2`.
     #
-    # Off the hour for e2e.yml's reason: GitHub queues scheduled runs and the
-    # top of the hour is where the queue is longest, so `0 4 * * 2` buys a
-    # delay and nothing else.
+    # Monthly is a cadence decision rather than a finding. The pull request
+    # this workflow opens is read and merged by a person, and how often that
+    # lands on somebody is the maintainer's call; nothing about the mechanism
+    # changed with it. The release somebody is actually waiting on was never
+    # the schedule's case anyway — `workflow_dispatch` below is that path, and
+    # it is unchanged.
     #
-    # Not Monday because that is the slot e2e.yml occupies whenever its
-    # schedule is enabled — 04:17 — and the two would meet at a state lock
-    # rather than politely. That schedule is commented out today, which makes
-    # the collision dormant rather than gone: e2e.yml keeps the commented
-    # `cron:` line beside the argument for switching it off, and calls
-    # re-enabling it a deliberate, reviewable edit rather than a settings
-    # toggle. So the argument that follows is kept rather than deleted — the
-    # collision comes back the moment somebody uncomments that line, and a
-    # Tuesday chosen against it does not have to be chosen again then.
+    # The 3rd, and only half of that is argued. Any day above 28 skips
+    # February and so is not monthly, which rules out most of the month's back
+    # half. Early in the month otherwise, so a month that produced no refresh
+    # is visible with the month still in front of it rather than behind it.
+    # Between the 1st and the 5th nothing distinguishes one day from another,
+    # and the 3rd is not claimed to be better than the 2nd.
     #
-    # Opening this pull request starts a plan.yml run against every
-    # environment, and a plan takes each environment's state lock; e2e.yml
-    # applies, smoke-tests and destroys `stage` while holding stage's. Both of
-    # e2e.yml's jobs are bounded at 120 minutes — deliberately loose, so that
-    # they bound a wedged runner rather than a slow one — which means a Monday
-    # slot here would have to be picked against the timeout rather than against
-    # the observed runtime. A day's separation makes the overlap impossible
-    # instead of unlikely, and once that schedule is back it puts this proposal
-    # a day after the end-to-end run that exercised what it proposes moving
-    # away from.
+    # 04:23 is kept, and why it is kept is not why it was picked. It was picked
+    # off the hour on e2e.yml's reasoning — GitHub queues scheduled runs and
+    # the top of the hour is where the queue is longest — and the runs since
+    # have not supported that: the two this schedule has actually produced
+    # started at 09:28Z and 08:55Z, four and a half hours behind the cron. An
+    # odd minute buys nothing measurable against a queue that deep. It is kept
+    # because .github/dependabot.yml is scheduled for the same minute and
+    # explains there why the two cannot contend; moving it would falsify that
+    # for no gain.
+    #
+    # -----------------------------------------------------------------------
+    # The Monday collision, which this schedule does not solve
+    # -----------------------------------------------------------------------
+    #
+    # The weekly `23 4 * * 2` above was a Tuesday to miss Monday 04:17, which
+    # is the slot e2e.yml occupies whenever its schedule is enabled. The
+    # collision it was avoiding is real and nothing here softens it: opening
+    # this pull request starts a plan.yml run against every environment and a
+    # plan takes each environment's state lock, while e2e.yml applies,
+    # smoke-tests and destroys `stage` holding stage's. Both of e2e.yml's jobs
+    # are bounded at 120 minutes — deliberately loose, so that they bound a
+    # wedged runner rather than a slow one — so the window a same-day slot
+    # would have to be picked against is the timeout rather than the observed
+    # runtime, and the four-and-a-half-hour queue delays measured above are the
+    # same order of magnitude as any separation an hour-of-day choice could
+    # buy. A whole day was picked instead of reasoning about hours, and it made
+    # the overlap impossible rather than unlikely.
+    #
+    # A monthly cron cannot buy a whole day. GitHub Actions cron is standard
+    # cron: there is no nth-weekday syntax, and naming both a day-of-month and
+    # a day-of-week ORs them rather than ANDing them, so "the first Tuesday of
+    # the month" is not an expression that exists. The 3rd falls on a Monday
+    # roughly one month in seven — and, the part worth being explicit about,
+    # moving e2e.yml to some other weekday would not help either. A
+    # day-of-month cron lands on every weekday about equally often, so whatever
+    # day e2e.yml is put on, this workflow meets it about one month in seven.
+    # The separation that used to exist is not available from either end.
+    #
+    # So the argument is not re-solved, it is moved, and that is recorded here
+    # rather than quietly dropped. e2e.yml's schedule is commented out today,
+    # so there is nothing on Monday to collide with; e2e.yml keeps that `cron:`
+    # line beside the argument for switching it off and calls re-enabling it a
+    # deliberate, reviewable edit rather than a settings toggle. Whoever makes
+    # that edit inherits this, and what is left to them is a choice rather than
+    # a fix: widen the hour-of-day gap between 04:17 and the 04:23 above,
+    # knowing the queue delays above make that a probability rather than a
+    # guarantee, or accept the roughly-one-month-in-seven overlap.
+    #
+    # Accepting it is defensible, which is why this schedule ships as it is.
+    # The cost when the two do meet is bounded: the loser of a state lock is a
+    # failed `plan` job on a pull request nothing has merged, re-runnable once
+    # the other holder is done. A red check on a correct proposal, not a
+    # damaged environment — and on a proposal that waits for a human review
+    # regardless.
+    #
+    # -----------------------------------------------------------------------
     #
     # A scheduled workflow is disabled automatically after 60 days without
-    # repository activity, which matters more here than anywhere: a refresh
-    # that stops happening is silent and looks exactly like a week with
-    # nothing to update. The step summary below is written to tell those two
-    # apart when somebody does look.
-    - cron: "23 4 * * 2"
+    # repository activity, and monthly sharpens that rather than softening it.
+    # The 60 days is unchanged — it is a property of repository activity, not
+    # of this cron — but how much of it is observable is not: a weekly schedule
+    # fires about eight times inside that window and a monthly one fires twice,
+    # so the disablement arrives after far fewer chances to notice it, and a
+    # run that did not happen takes a month rather than a week to be missable.
+    # A refresh that stops happening is silent and looks exactly like a month
+    # with nothing to update. The step summary below is written to tell those
+    # two apart when somebody does look.
+    - cron: "23 4 3 * *"
 
   # On demand as well, for the case the schedule is bad at: a provider release
   # somebody is waiting on. No inputs — the directories are discovered and the
@@ -317,8 +370,11 @@ jobs:
         # argue. What this loop refreshes and what the run actually proposes
         # are two separate mechanisms — `find` here, a git pathspec in the two
         # steps below — and the guarantee above is worth exactly as much as
-        # their agreement. It was worth less than that until they were made to
-        # agree. Both steps matched `'**/.terraform.lock.hcl'` alone, and a
+        # their agreement. Getting them to agree took two attempts, and both
+        # are written down because the second failure is the one the first fix
+        # caused.
+        #
+        # Both steps first matched `'**/.terraform.lock.hcl'` alone, and a
         # `**/`-prefixed pathspec requires at least one directory component.
         # Verified in a throwaway repository holding lock files at the root,
         # at `sub/` and at `deep/deeper/`: this `find | sed` yields `.`,
@@ -326,23 +382,42 @@ jobs:
         # `git diff --name-only -- '**/.terraform.lock.hcl'` and
         # `git add -- '**/.terraform.lock.hcl'` yield the latter two and never
         # the root. With only the root file modified, `git diff --quiet`
-        # against that pathspec exits 0.
+        # against that pathspec exits 0. So a repository-root lock file would
+        # have been refreshed by this loop, reported as "no change" by the
+        # summary step, and dropped from the pull request — the run green, the
+        # file gone, nothing anywhere saying so. That is the silent-narrowing
+        # failure this whole file is arranged against, relocated from platforms
+        # to paths.
         #
-        # So a repository-root lock file would have been refreshed by this
-        # loop, reported as "no change" by the summary step, and dropped from
-        # the pull request — the run green, the file gone, nothing anywhere
-        # saying so. That is the silent-narrowing failure this whole file is
-        # arranged against, relocated from platforms to paths: a lock this
-        # workflow rewrote and then declined to propose is no better than a
-        # lock narrowed to one platform. Both steps now name the root form
-        # alongside the nested one, re-verified in the same repository.
+        # The fix was to name the root form alongside the nested one, and it
+        # broke this workflow outright the first time the schedule ran it.
+        # `git diff` tolerates a pathspec that matches nothing; `git add --`,
+        # which is what `create-pull-request` runs internally over
+        # `add-paths`, does not — it exits 128 with `fatal: pathspec
+        # '.terraform.lock.hcl' did not match any files`. This repository
+        # commits five lock files and no root one, so the literal root entry
+        # matched nothing on every run. Scheduled run 34207129772 resolved aws
+        # 6.63.0 in all five directories, printed a five-file diffstat from the
+        # step below, and then died at the pull request without opening one. A
+        # pathspec verified against `git diff` and then handed to `git add` is
+        # the same untested-predicate mistake as the one it was fixing.
         #
-        # This repository commits no root lock file, which is why the gap cost
-        # nothing and why review passed it: the pathspec was checked against
-        # files one level deep, where it is correct, and it is correct there
-        # for every case anybody thought to try. A predicate exercised only
-        # where it holds has not been tested, and the rule this comment
-        # already applies to discovery applies to staging too.
+        # `*.terraform.lock.hcl` is what both steps name now. One pathspec,
+        # matching the root form and every nested one — git's default pathspec
+        # globbing lets `*` cross `/` — and matching nothing only in a
+        # repository with no committed lock file at all, which is the case the
+        # guard below already exits 1 on before either step runs. Re-verified
+        # in both throwaway shapes, with a root lock file and without one, for
+        # `git add --` as well as `git diff --name-only` and
+        # `git diff --quiet`, since `git add` is the caller the first
+        # verification did not cover.
+        #
+        # What the wider glob costs, stated rather than discovered: `*` matches
+        # a suffix as well as a path, so a file named
+        # `something.terraform.lock.hcl` anywhere in the tree would be staged
+        # too. Terraform writes one filename and nothing here is named that. A
+        # pathspec that could over-match a file nobody creates is the right
+        # side of this trade against one that aborted the run.
         #
         # A `while read` loop over a here-string rather than `mapfile`, unlike
         # plan.yml's `detect`. The difference is who is expected to run it:
@@ -391,13 +466,14 @@ jobs:
         id: changes
         shell: bash
         run: |
-          # Two pathspecs and not one, held in a variable so the three uses
-          # below cannot drift apart. `**/` requires at least one directory
-          # component, so the nested form alone does not match a lock file at
-          # the repository root; the pair does. The same pair is repeated in
-          # `add-paths` on the step after this one, which is the copy that
-          # decides what the pull request contains.
-          locks=(".terraform.lock.hcl" "**/.terraform.lock.hcl")
+          # One pathspec, held in a variable so the three uses below cannot
+          # drift apart. It matches the root form and every nested one, and it
+          # does not error when the root form is absent — which is this
+          # repository, and which is what the two-entry list it replaces died
+          # on. The argument is at the discovery step above. The same pathspec
+          # is repeated in `add-paths` on the step after this one, which is the
+          # copy that decides what the pull request contains.
+          locks=("*.terraform.lock.hcl")
 
           if git diff --quiet -- "${locks[@]}"; then
             echo "no change: every committed lock file is already current"
@@ -433,13 +509,15 @@ jobs:
           # than a consequence, which matters because plan.yml's `detect` job
           # decides what to plan by reading exactly that set.
           #
-          # Two entries, for the reason argued at the discovery step above:
-          # `**/.terraform.lock.hcl` matches nothing at the repository root,
-          # so the root form is named alongside it. `add-paths` takes a
-          # newline-separated list.
+          # One entry, and the one that matters most, for the reason argued at
+          # the discovery step above: this is the copy the action feeds to
+          # `git add --`, which aborts the run on a pathspec matching nothing
+          # rather than shrugging at it the way `git diff` does.
+          # `*.terraform.lock.hcl` matches the root form and every nested one
+          # and is absent-root-safe. `add-paths` takes a newline-separated
+          # list; there is one line here on purpose.
           add-paths: |
-            .terraform.lock.hcl
-            **/.terraform.lock.hcl
+            *.terraform.lock.hcl
           branch: ci/provider-lock-refresh
           # Nothing here reopens a closed refresh, so a branch left behind
           # after one is closed unreviewed would sit there being stale.
@@ -469,7 +547,7 @@ jobs:
           # inputs reach `git commit` and nothing else; the pull request is
           # opened through the REST API with the token below, and a
           # fine-grained PAT has no identity apart from the person who owns
-          # it. So on a Tuesday 04:23 run the Actions list shows the
+          # it. So on a scheduled 04:23 run the Actions list shows the
           # maintainer opening a pull request they were asleep for.
           #
           # Nothing written here can close that. Only a GitHub App

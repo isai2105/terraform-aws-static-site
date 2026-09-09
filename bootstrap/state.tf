@@ -142,8 +142,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
 # This is not housekeeping. With native S3 locking every plan, apply and
 # destroy writes a `<key>.tflock` object and then deletes it, and on a versioned
 # bucket a delete is a delete marker laid over a retained version. Across three
-# state keys, every pull request, plus the weekly end-to-end run, that is a
-# steady stream of noncurrent objects that nothing else removes.
+# state keys, every pull request, plus each dispatched end-to-end run, that is a
+# steady stream of noncurrent objects that nothing else removes. The pull
+# requests are what make it steady: e2e.yml's `cron:` is commented out, so an
+# end-to-end run arrives when somebody asks for one rather than on a schedule.
 #
 # S3 lifecycle filters match on prefix, never on suffix, so the `.tflock` keys
 # cannot be singled out. The rule is therefore bucket-wide and expressed as the

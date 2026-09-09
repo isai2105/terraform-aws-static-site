@@ -161,7 +161,7 @@ repos:
       # `init` resolves providers through .terraform.lock.hcl, so a commit that
       # refreshes a lock and nothing else still changes what this target would
       # say. That commit is no longer hypothetical: it is what
-      # .github/workflows/provider-lock-refresh.yml opens whenever its weekly
+      # .github/workflows/provider-lock-refresh.yml opens whenever its monthly
       # run finds a provider to move, and a maintainer pulling that branch to
       # check it locally is the case this alternation covers.
       - id: terraform-validate
