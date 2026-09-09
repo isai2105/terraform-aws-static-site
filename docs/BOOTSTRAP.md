@@ -688,7 +688,7 @@ gh secret set PROVIDER_LOCK_TOKEN
 
 **Until it is set, that workflow fails on its first step**, deliberately and before it spends the
 run downloading providers: it would otherwise compute five correct lock files and then fail to do
-the one thing it exists to do, on an authentication error naming nothing. A Tuesday-morning red
+the one thing it exists to do, on an authentication error naming nothing. An early-morning red
 check pointing at this section is the better half of that trade.
 
 Dependabot's own pull requests do not have this problem — they do trigger workflows — but they

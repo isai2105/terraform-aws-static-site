@@ -48,11 +48,14 @@
 # quietly edits itself.
 #
 # .github/workflows/provider-lock-refresh.yml is the answer instead: the same
-# bump, proposed weekly, with the `providers lock` step that keeps both
-# platforms in the file. That workflow also gets the bump reviewed against a
-# real plan, which a Dependabot pull request could not — it carries a
-# read-only token and cannot assume an OIDC role, and plan.yml selects every
-# environment for any change under `modules/`.
+# bump, proposed monthly, with the `providers lock` step that keeps both
+# platforms in the file. The cadence is that workflow's to state and is argued
+# beside its own `cron:`; what matters here is that the bump is proposed at
+# all, by something that writes both platforms into the file. That workflow
+# also gets the bump reviewed against a real plan, which a Dependabot pull
+# request could not — it carries a read-only token and cannot assume an OIDC
+# role, and plan.yml selects every environment for any change under
+# `modules/`.
 #
 # ---------------------------------------------------------------------------
 # The state of Dependabot's other two features on this repository
@@ -89,8 +92,8 @@ updates:
       # Tuesday, and not the Monday e2e.yml occupies whenever its schedule is
       # enabled. The ordering is the argument: with that schedule live,
       # e2e.yml applies and destroys `stage` on Monday at 04:17 UTC against
-      # whatever `main` currently locks, and both bump proposals arrive the
-      # morning after — so what they propose moving away from was exercised
+      # whatever `main` currently locks, and this bump proposal arrives the
+      # morning after — so what it proposes moving away from was exercised
       # end to end a day earlier rather than a week earlier. That cron is
       # commented out today, so neither half of it holds: nothing occupies
       # Monday, and nothing produces the day-earlier evidence either. Tuesday
@@ -100,14 +103,18 @@ updates:
       # Early in the week for e2e.yml's stated reason: a failure gets the week
       # to be dealt with rather than a weekend to sit through.
       #
-      # This is the same minute provider-lock-refresh.yml is scheduled for,
-      # and that is deliberate rather than an oversight, because the two
-      # cannot contend. That workflow's pull request touches `modules/` and so
-      # starts a plan against every environment's real state; this one's
-      # touches only `.github/`, which plan.yml's `detect` job excludes from
-      # the shared set by name and says it excludes for exactly this case — so
-      # a Dependabot pull request takes no state lock and runs no plan at all.
-      # One maintenance slot, two proposals, one sitting.
+      # provider-lock-refresh.yml is scheduled for the same minute, on the 3rd
+      # of each month rather than every Tuesday, so the two share a slot when
+      # the 3rd is a Tuesday and not otherwise. That coincidence is harmless
+      # rather than merely tolerated, because the two cannot contend. That
+      # workflow's pull request touches `modules/` and so starts a plan against
+      # every environment's real state; this one's touches only `.github/`,
+      # which plan.yml's `detect` job excludes from the shared set by name and
+      # says it excludes for exactly this case — so a Dependabot pull request
+      # takes no state lock and runs no plan at all. The minute is shared on
+      # purpose, and it is the sharing rather than the alignment that was ever
+      # the point: whenever both do land together it is one maintenance
+      # sitting, and when they do not, nothing is lost.
       day: "tuesday"
       time: "04:23"
       # Written down rather than inherited. Etc/UTC is Dependabot's default,

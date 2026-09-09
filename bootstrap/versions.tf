@@ -30,7 +30,7 @@
 # measured, against 6.62.0, on the tree that carries this comment. What makes
 # the bump a reviewed change of its own is
 # .github/workflows/provider-lock-refresh.yml, which re-resolves every
-# committed lock file weekly and opens the result as a pull request. This
+# committed lock file monthly and opens the result as a pull request. This
 # constraint sets the range that refresh may move inside; it does not trigger
 # it and does not gate it.
 terraform {
