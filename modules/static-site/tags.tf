@@ -22,10 +22,12 @@
 # on. cloudfront.tf carries the evidence, and `bootstrap/oidc.tf`'s
 # `TagSiteCdnResources` statement is a grant that already depends on it.
 #
-# What that does not settle: whether the resource groups tagging API returns a
-# CloudFront function, which is what the teardown assertion actually queries.
-# That is unmeasured here — see docs/TEARDOWN.md section 6.1 — so the function is
-# neither in the covered half nor in the invisible one.
+# Being tagged is still a separate claim from being *returned* by the resource
+# groups tagging API, which is what the teardown assertion actually queries.
+# That second one was measured on 2026-09-08 — a standing `stage` environment,
+# the assertion's own two tag filters, us-east-1 — and the API returned the
+# function, so it counts in the covered half rather than the invisible one. One
+# run, one account, one day; see docs/TEARDOWN.md section 6.1 for the run.
 #
 # The precondition in logging.tf, on the access-log group,
 # therefore guarantees that everything *taggable* is tagged, which is a narrower

@@ -57,9 +57,9 @@
 # So the four quota-bearing resources *this file* creates per environment — two
 # cache policies and two response headers policies — are invisible to that check,
 # permanently and unfixably: a leak here leaves the assertion green. That count
-# is this file's own and does not extend to the function, whose visibility to
-# that API is unmeasured rather than settled either way; see docs/TEARDOWN.md
-# section 6.1.
+# is this file's own and does not extend to the function, which that same API
+# was measured returning on 2026-09-08, with an environment standing — one run,
+# one account, one day; see docs/TEARDOWN.md section 6.1.
 #
 # This is the one place the module's tagging story does not hold, and it is
 # worth being exact about what it costs, because the resources it applies to are

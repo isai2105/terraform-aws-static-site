@@ -30,15 +30,17 @@
 # cover a name carrying a random suffix. The same target sweeps the
 # viewer-request function below, by the same prefix, in the same run.
 #
-# Nor does the function being taggable make this resource's position "exactly
-# true rather than approximately so". That helps itself to a certainty the
-# paragraph below explicitly declines: whether the resource groups tagging API
-# returns a CloudFront function has not been measured here, so the function's
-# standing against a tag query is unproven in either direction, and this
-# resource's uniqueness cannot be settled further than that question is. What can
-# be said without it, and is all that is claimed: the OAC is untaggable and the
-# function is not. That is a difference between the resources, not a difference
-# anybody has observed in what a check returns.
+# The function being taggable was never enough on its own to make this
+# resource's position "exactly true rather than approximately so" — taggable and
+# visible to a tag query are two claims, and only the first was in hand when this
+# was written. The second is now: whether the resource groups tagging API returns
+# a CloudFront function was measured on 2026-09-08 — a standing `stage`
+# environment, the teardown assertion's own two tag filters, us-east-1 — and it
+# returned the function. So the difference between the two resources is one
+# somebody has observed in what a check returns, and not only a difference in the
+# provider schema: the OAC is untaggable and invisible to that query, and the
+# function is neither. One run, one account, one day, so that is evidence rather
+# than a standing guarantee; docs/TEARDOWN.md 6.1 carries the run.
 #
 # The name is left alone rather than made stable because the quota is 100 per
 # account against the policies' 20, so the accumulation pressure is an order of
@@ -175,15 +177,19 @@ resource "aws_cloudfront_function" "spa_routing" {
   # — the provider calls `ListTagsForResource` against this function's ARN on
   # every read of it — and argues the dependency at length beside the grant.
   #
-  # Do not overclaim in the other direction, which is the easier mistake from
-  # here. That the function is tagged does not establish that a tag query would
-  # return it. Whether the resource groups tagging API actually *returns* a
-  # CloudFront function is a separate question, and it has not been measured
-  # here: the two-region inventory in docs/TEARDOWN.md 6.2 was taken on
-  # 2026-08-27, before this resource existed, and nothing has re-run it since. So
-  # the honest position is that the barrier is unproven rather than proven — a
-  # weaker claim than "no tag query can see it", and a different one, and neither
-  # this comment nor the teardown documentation may be read as settling it.
+  # That the function is tagged still does not by itself establish that a tag
+  # query would return it. Whether the resource groups tagging API actually
+  # *returns* a CloudFront function is a separate question, and it took its own
+  # measurement: the two-region inventory in docs/TEARDOWN.md 6.2 was taken on
+  # 2026-08-27, before this resource existed, so the query was re-run on
+  # 2026-09-08 with a `stage` environment standing. It returned this function's
+  # ARN in us-east-1, `cloudfront list-tags-for-resource` on that ARN returned
+  # all five default_tags independently, and the same query narrowed with
+  # `--resource-type-filters cloudfront:function` returned it as well. So a tag
+  # query does see a leaked one. One run, one account, one day, and against a
+  # standing function rather than a leaked one — the same resource carrying the
+  # same tags, which is why it answers the question — so read it as evidence and
+  # not as a guarantee; docs/TEARDOWN.md 6.1 records the run.
   #
   # The untaggability claim has one source, and it is AWS's own sentence "you
   # can't add tags to edge functions". Why that sentence says what it says is not

@@ -1080,6 +1080,17 @@ jobs:
       # logging control plane answers only there whatever region the environment
       # uses. A single-region query reports success over five live resources.
       #
+      # And that undersells the second region, because it is not only the logging
+      # control plane that answers there. CloudFront-typed resources surface to
+      # the tagging API in us-east-1 ONLY: on 2026-09-08 this same query run
+      # against the environment's own region returned nothing CloudFront-typed at
+      # all — the distribution included, which is applied from that region and
+      # still does not answer there — while us-east-1 returned it beside the log
+      # group, the three delivery resources and the viewer-request function. So
+      # dropping us-east-1 would not merely lose the log-delivery set; it would
+      # lose every taggable CloudFront resource this module creates at once.
+      # One run, one account, one day.
+      #
       # The log group is checked by name as well, and it is not redundant with
       # the query above. The tagging API returns only *tagged* resources, and
       # the specific way this module can break — an aliased provider missing its
@@ -1106,20 +1117,23 @@ jobs:
       # default_tags, so Project and Env are on it already, which are the two tags
       # the query below matches on.
       #
-      # What does NOT follow is that the query below would return a leaked
-      # function. Nobody has measured that. The two-region inventory in
-      # docs/TEARDOWN.md 6.2 was taken on 2026-08-27, before this resource
-      # existed, and nothing has re-run it since, so whether the resource groups
-      # tagging API returns a CloudFront function is unproven in either direction.
-      # Untaggability is not the reason the function is excluded here; it is
-      # neither counted as covered by the inventory below nor as invisible to it.
+      # Being tagged is still not the same claim as being returned, and that
+      # second one was measured on 2026-09-08 rather than assumed: with a stage
+      # environment standing, the exact get-resources call below — same two tag
+      # filters, us-east-1 — returned the function's ARN beside the distribution,
+      # the log group and the three delivery resources, and
+      # `cloudfront list-tags-for-resource` on that ARN independently returned all
+      # five of the module's default_tags. One run, one account, one day, and
+      # taken against a standing function rather than a leaked one, which is the
+      # same resource carrying the same tags. So the query below DOES cover a
+      # leaked function. docs/TEARDOWN.md 6.1 carries the full result.
       #
       # All of them are covered by the state assertion in every failure mode this
       # workflow can produce — a destroy that leaves them behind leaves them in
       # state — and by the manual detectors in docs/TEARDOWN.md section 6.1
-      # otherwise. Section 6.1's prefix sweep is what covers the function in the
-      # meantime, and it covers it on grounds that do not depend on the unmeasured
-      # answer above.
+      # otherwise. Section 6.1's prefix sweep of the function survives that
+      # measurement as redundancy rather than as the only detector: it keys on the
+      # name prefix rather than on the Project tag, so the two fail differently.
       - name: Verify the teardown against AWS
         id: verify
         if: always()
