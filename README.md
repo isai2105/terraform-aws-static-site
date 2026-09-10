@@ -416,17 +416,30 @@ Specific ones, with what each buys and what it would cost to choose differently.
   `ManageVendedLogDeliveryPolicy` and `VerifyTeardownByTag`. Three more are written on
   `local.site_distribution_arns`, which is the single ARN `distribution/*` and so admits the same
   set of requests `*` does: `ServiceLevelAccessForLogDelivery`, and the distribution halves of
-  `TagSiteCdnResources` and `UntagSiteCdnResources`. On none of the ten is one environment's role
-  narrower than the other's: each reaches the whole account. `CreateSiteDistribution` and
-  `RequestCertificates` are written on `*` too and are deliberately not in that list, because each
-  carries an `aws:RequestTag/Name` condition holding it to its own environment's pattern, as
-  `ManageSiteDistributions` and `DeleteSiteCertificates` do with `aws:ResourceTag/Name`. Those tag
-  conditions are per-environment accident guards rather than boundaries, and `docs/TEARDOWN.md`
-  §6.3 prices the difference: `TagSiteCdnResources` carries `cloudfront:TagResource` on
-  `distribution/*` unconditioned, so a foreign distribution can be tagged into scope first and
-  then acted on. And the two CloudFront policy quotas are per account, so two environments hold
-  4 of 20 in each. Separate accounts are the correct answer for anything durable, and are a
-  different project.
+  `TagSiteCdnResources` and `UntagSiteCdnResources`. Three more again are scoped to a resource
+  type but not to an environment — `ManageCertificates` and `UntagSiteCertificates` to
+  `certificate/*`, `ManageDnsRecords` to `hostedzone/*`. Those are shared surface in the same
+  practical sense, precisely because of what the wildcard names: a resource type, not an
+  environment. Each role reaches every certificate and every hosted zone in the account.
+  `UntagSiteCertificates` does carry a condition, on `aws:TagKeys`, as `UntagSiteCdnResources`
+  does in the group above it — but both protect a tag key from removal rather than narrowing the
+  statement to one environment, which is the criterion this list is drawn on. On none of the
+  thirteen is one environment's role narrower than the other's: each reaches the whole account.
+  `CreateSiteDistribution` and `RequestCertificates` are written on `*` too and are deliberately
+  not in that list, because each carries an `aws:RequestTag/Name` condition holding it to its own
+  environment's pattern, as `ManageSiteDistributions` and `DeleteSiteCertificates` do with
+  `aws:ResourceTag/Name`. Those tag conditions are per-environment accident guards rather than
+  boundaries, and `docs/TEARDOWN.md` §6.3 prices the difference: the tag grants reach
+  `distribution/*` and `certificate/*`, so a foreign resource could be tagged into scope first and
+  then acted on. `DenyForeignDistributionRetag` and `DenyForeignCertificateRetag` are *believed*
+  to close that pair of paths and have not been measured — each denies the tag-add wherever a
+  `Name` tag is present and does not match this environment's pattern, guarded by a `Null` test on
+  the same key so that a create, whose resource has no tags to read yet, is untouched. Read them
+  as unproven: if IAM does not populate `aws:ResourceTag/Name` for those actions the denies never
+  fire, and they fail that way silently. A resource carrying no `Name` tag at all stays reachable
+  by design; everything this repository creates carries one. And the two CloudFront policy quotas
+  are per account, so two environments hold 4 of 20 in each. Separate accounts are the correct
+  answer for anything durable, and are a different project.
 
   **"Nearly" is load-bearing: a cleanup sweep written from the pattern alone would miss five of
   the twenty-three outright and stumble on a sixth.** The three SSM parameters are
