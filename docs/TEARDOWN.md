@@ -621,13 +621,15 @@ whole of it. The conclusion does not follow, because a
 `DeleteDistribution`, `UpdateDistribution`, `GetDistribution` and `GetDistributionConfig` — all
 four of which take the `distribution` resource type and support `aws:ResourceTag/${TagKey}`.
 Twenty-four of the thirty-four CloudFront actions on the CDN surface take a resource ARN; those
-ten do not. The thirty-four is the CDN surface — `ManageCloudFront`, `ManageSiteFunctions` and
-`TagSiteCdnResources` — rather than every CloudFront action the policy grants: a thirty-fifth,
-`cloudfront:AllowVendedLogDeliveryForResource`, sits further down in
-`ServiceLevelAccessForLogDelivery`. Generalising from the ten to the twenty-four is the error,
-and the `ManageCloudFront` comment in `bootstrap/oidc.tf` says so at the grant itself, with the
-same count and the same scoping of it. Count from that statement rather than from this sentence
-if the two ever disagree: the action lists move, and the numbers move with them.
+ten do not. The thirty-four is the CDN surface — `ManageCloudFront` (21),
+`ManageSiteDistributions` (4), `ManageSiteFunctions` (5), `TagSiteCdnResources` (2),
+`CreateSiteDistribution` (1) and `UntagSiteCdnResources` (1) — rather than every CloudFront
+action the policy grants: a thirty-fifth, `cloudfront:AllowVendedLogDeliveryForResource`, sits
+further down in `ServiceLevelAccessForLogDelivery`. Generalising from the ten to the twenty-four
+is the error, and the `ManageCloudFront` comment in `bootstrap/oidc.tf` says so at the grant
+itself, with the same count and the same scoping of it. Count from that statement rather than
+from this sentence if the two ever disagree: the action lists move, and the numbers move with
+them.
 
 Part of the surface is already scoped rather than merely scopable. `ManageSiteFunctions` names
 `function/<name_prefix>-site-*` across all five function actions, and `TagSiteCdnResources` names
