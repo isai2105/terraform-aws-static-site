@@ -447,10 +447,11 @@ nothing in the workflow runs one. Do it by hand against `stage`, following secti
 `bootstrap/oidc.tf` now carries `GetDistribution` and `GetDistributionConfig` in a separate,
 unconditioned `ReadSiteDistributions` statement, so the post-delete poll is authorised against a
 resource with no tags left to read. **That is a change to source. The inline policy on a live
-apply role is only rewritten by `terraform apply` in `bootstrap/`**, so until that has been run
-against this account, every apply role still carries the old single statement and every destroy
-still ends this way. If you hit this on a checkout that already contains the fix, check what the
-account actually holds before concluding the fix does not work:
+apply role is only rewritten by `terraform apply` in `bootstrap/`**, and until that has been run
+against an account, every apply role there still carries the old single statement and every
+destroy still ends this way. That apply was hand-run against this account on 2026-09-10, and both
+apply roles now carry the statement. If you hit this on a checkout that already contains the fix,
+check what the account actually holds before concluding the fix does not work:
 
 ```bash
 aws iam get-role-policy \
