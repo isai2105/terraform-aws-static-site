@@ -1097,7 +1097,20 @@ resource "aws_iam_role" "apply" {
   #
   # Reachable only through AssumeRoleWithWebIdentity, which is how CI assumes
   # this role. A role assumed from another session is capped by AWS at one hour
-  # whatever this says.
+  # whatever this says, so a local operator driving a destroy from an MFA
+  # session gets sixty minutes and not this — docs/TEARDOWN.md section 2.3.
+  #
+  # A ceiling is also only a ceiling: STS mints whatever the caller asks for,
+  # and `aws-actions/configure-aws-credentials` asks for 3600 whenever
+  # `role-duration-seconds` is unset. So the six steps that assume this role
+  # inside a 120-minute job name the number rather than leaving it to the
+  # action's default — the initial assume and the narrowed re-assume in each of
+  # apply.yml's apply job, e2e.yml's lifecycle job and e2e.yml's cleanup job. CI
+  # runs on two hours because those steps request it, not because this line
+  # permits it. Of the two credential steps that ask for nothing, only one
+  # assumes this role at all: apply.yml's plan job, capped at twenty minutes,
+  # which is well inside even the action's default hour. The other is plan.yml,
+  # which assumes the plan role, whose own ceiling is 3600.
   max_session_duration = 7200
 }
 

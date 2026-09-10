@@ -118,6 +118,19 @@ A session expiring mid-destroy is the same event as the kill above: a half-remov
 and a lock nobody holds. Re-assume the role immediately before each destroy rather than relying
 on a session assumed some time earlier.
 
+The rule is also what CI does, and not only advice to someone at a terminal. Three jobs run a
+destroy — `apply.yml`'s `apply` job, `e2e.yml`'s `lifecycle` job, which applies, smoke-tests and
+destroys in one, and `e2e.yml`'s `cleanup` job, which re-attempts a teardown that did not come
+back clean. Each re-assumes the apply role immediately before the destroy, narrowed by a session
+policy, and each does so fail-open: a re-assume that is skipped or fails leaves the destroy
+running on the credential the job already held. Each of those three jobs' two credential steps —
+the assume before `init` and the narrowed re-assume — sets `role-duration-seconds` to 7200, the
+role's full `max_session_duration`, rather than the hour `aws-actions/configure-aws-credentials`
+sends when the input is unset; the jobs themselves carry `timeout-minutes: 120`, sized against the
+provider's 90-minute CloudFront deletion waiter. The two credential steps that do not ask for more
+are plan-only: `plan.yml` assumes the plan role, capped at 3600, and `apply.yml`'s plan job is
+capped at twenty minutes.
+
 One measured constraint that surprises people, because it contradicts the role's own
 configuration: **a role assumed from another session — an MFA `sts:GetSessionToken` session, for
 example — is capped by AWS at 60 minutes regardless of the role's `max_session_duration`.**

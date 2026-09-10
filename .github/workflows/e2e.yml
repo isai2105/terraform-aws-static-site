@@ -378,6 +378,22 @@ jobs:
           # so that an unattended apply is distinguishable in the trail from a
           # dispatched one.
           role-session-name: e2e-stage-${{ github.run_id }}
+          # Two hours, matching `max_session_duration` on the apply role in
+          # `bootstrap/oidc.tf`, for the reason apply.yml gives at its own apply
+          # step: the action resolves an unset `role-duration-seconds` to 3600,
+          # so without this line this job's 120-minute cap is guarding a
+          # credential that expires at minute 60 — inside the provider's
+          # 90-minute CloudFront deletion waiter.
+          #
+          # This session is also the documented fallback. The narrowed re-assume
+          # below is skipped when the policy could not be built and is
+          # `continue-on-error` when the call fails, and the destroy then
+          # proceeds on this credential, so it needs the headroom in its own
+          # right.
+          #
+          # STS refuses anything above the role's ceiling, so a wrong number
+          # fails at this step, before `init`.
+          role-duration-seconds: 7200
 
       # Terraform is invoked directly rather than through the Makefile, for the
       # reason plan.yml and apply.yml give: the Makefile's targets init with
@@ -1020,6 +1036,16 @@ jobs:
           role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: e2e-stage-destroy-${{ github.run_id }}
+          # Two hours, as on the wide session this job assumed before `init`:
+          # when the narrowing succeeds this is the credential the destroy runs
+          # on, and the action's one-hour default would put its expiry back
+          # inside the provider's 90-minute waiter window.
+          #
+          # Wrong here it fails quietly rather than loudly, unlike the step
+          # before `init`: `continue-on-error` would swallow an STS refusal into
+          # the warning below and let the destroy run unnarrowed. apply.yml's
+          # re-assume carries the same caveat.
+          role-duration-seconds: 7200
           inline-session-policy: ${{ steps.outputs.outputs.session-policy }}
 
       # `continue-on-error` hides the failure from the job's status, which is
@@ -1301,6 +1327,12 @@ jobs:
           role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: e2e-cleanup-stage-${{ github.run_id }}
+          # Two hours, matching the apply role's `max_session_duration` and the
+          # lifecycle job's reasoning above. It matters most here: this job only
+          # runs when the teardown above did not come back clean, and it is the
+          # credential the retried destroy falls back to whenever the narrowed
+          # re-assume below is skipped or fails.
+          role-duration-seconds: 7200
 
       - name: Initialise the backend
         shell: bash
@@ -1428,6 +1460,12 @@ jobs:
           role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: e2e-cleanup-destroy-stage-${{ github.run_id }}
+          # Two hours, as on the wide session assumed above — when the narrowing
+          # succeeds this is the credential the retried destroy runs on.
+          # `continue-on-error` on this step means a refused duration degrades
+          # to the warning below rather than failing the retry, so this number
+          # is one of the few here that can be got wrong quietly.
+          role-duration-seconds: 7200
           inline-session-policy: ${{ steps.session-policy.outputs.session-policy }}
 
       # `continue-on-error` hides the failure from the job's status, so it is

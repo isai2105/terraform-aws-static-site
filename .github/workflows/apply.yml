@@ -640,6 +640,26 @@ jobs:
           role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: ${{ inputs.action }}-${{ inputs.environment }}-${{ github.run_id }}
+          # Two hours, matching `max_session_duration` on the apply role in
+          # `bootstrap/oidc.tf`. Stated rather than inherited, because what is
+          # inherited is one hour: the action resolves an unset
+          # `role-duration-seconds` to 3600 and sends it, so without this line
+          # the role's ceiling is unreachable and this job's 120-minute cap is
+          # guarding a credential that expires at minute 60. This 7200 and that
+          # 120 are the same number twice, and both were sized against the
+          # provider's hardcoded 90-minute CloudFront deletion waiter: a destroy
+          # that loses its credential inside that window leaves exactly the
+          # half-removed distribution and held `.tflock` the pair exists to
+          # prevent.
+          #
+          # It belongs on this step and not only on the narrowed re-assume
+          # below, because an apply never reaches that step at all, and this job
+          # has no retry to fall back on the way e2e.yml's teardown does.
+          #
+          # STS refuses any request above the role's own ceiling, so a number
+          # that is wrong here fails loudly at this step, before `init` — never
+          # as a run that half-worked.
+          role-duration-seconds: 7200
 
       # The same backend arguments the plan was taken with, because a plan is
       # only meaningful against the state it was computed from. Terraform holds
@@ -897,6 +917,17 @@ jobs:
           role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: destroy-narrowed-${{ inputs.environment }}-${{ github.run_id }}
+          # Two hours again, because when the narrowing succeeds this is the
+          # credential the destroy actually runs on. The action's one-hour
+          # default here would undo the line on the wide session above and put
+          # the expiry back inside the 90-minute waiter window.
+          #
+          # Note the asymmetry with the step before `init`: a duration STS
+          # refuses there is a red step and a stopped job, but
+          # `continue-on-error` here would swallow the same refusal into the
+          # warning below and let the destroy run unnarrowed. This is the one
+          # number in this step that can be got wrong quietly.
+          role-duration-seconds: 7200
           inline-session-policy: ${{ steps.session-policy.outputs.session-policy }}
 
       # `continue-on-error` hides the failure from the job's status, which is
