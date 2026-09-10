@@ -417,16 +417,26 @@ locals {
   #
   # This local stays account-wide while `ManageSiteDistributions` below is
   # conditioned on `aws:ResourceTag/Name`, and the difference is in the
-  # consumers rather than in the confidence. There are three, and each one
-  # refuses the condition for its own reason. `TagSiteCdnResources` is the
+  # consumers rather than in the confidence. There are seven consumers, and five
+  # of them refuse the condition, each for its own reason — the two that carry it
+  # are `ManageSiteDistributions` itself and the `DenyForeignDistributionRetag`
+  # written against it.
+  #
+  # `TagSiteCdnResources` is the
   # `TagResource` half of `CreateDistributionWithTags`, evaluated against a
   # distribution that does not exist yet, so a resource-tag condition there
   # denies every create — the statement's own comment says this at length and
   # says not to add one. `ServiceLevelAccessForLogDelivery` is called by the
-  # logging control plane rather than by this role directly. And
+  # logging control plane rather than by this role directly.
+  # `UntagSiteCdnResources` carries a condition of its own, on `aws:TagKeys`, and
+  # it protects the `Name` key rather than narrowing the statement to one
+  # environment — so it is a refusal of *this* condition, not an absence of any.
   # `InvalidateSiteDistributions` is rendered into the single shared
   # `app_deploy_boundary` policy, which has no per-environment copy to carry a
-  # per-environment condition.
+  # per-environment condition. And `ReadSiteDistributions` carries the
+  # `GetDistribution` the provider polls *after* the delete, against a resource
+  # with no tags left for a condition to read — the fifth, and the only one of
+  # the five whose reason was found by a failed teardown rather than by reading.
   #
   # What has changed is the reason this comment used to give, and it is corrected
   # rather than removed: it said a tag condition would "make the grant depend on
@@ -861,8 +871,10 @@ resource "aws_iam_role_policy" "plan_state" {
 #   - `apply_infrastructure` is rendered per environment and names one at every
 #     grant that can carry a name: the site bucket, the contract parameter path,
 #     the access log groups and the CloudFront function by ARN pattern, and the
-#     distribution create, the four distribution actions and the certificate
-#     delete by an `aws:ResourceTag/Name` or `aws:RequestTag/Name` condition. The
+#     distribution create, the two destructive distribution actions and the
+#     certificate delete by an `aws:ResourceTag/Name` or `aws:RequestTag/Name`
+#     condition. The two distribution reads are deliberately outside that list —
+#     `ReadSiteDistributions` says why. The
 #     stage role handed prod's distribution id is now refused.
 #
 #     This bullet used to say the opposite, and what it said was true when it was
@@ -1298,9 +1310,11 @@ data "aws_iam_policy_document" "apply_state" {
 #
 # Rendered once per environment, and every grant that *can* name one does: the
 # site bucket and its objects, the contract parameter path, the access log groups
-# and the CloudFront function by ARN, and the distribution create, the four
-# distribution actions and the certificate delete by an `aws:RequestTag/Name` or
-# `aws:ResourceTag/Name` condition. What is left on `*` is left there because the
+# and the CloudFront function by ARN, and the distribution create, the two
+# destructive distribution actions and the certificate delete by an
+# `aws:RequestTag/Name` or `aws:ResourceTag/Name` condition — the two
+# distribution reads excepted, for the reason `ReadSiteDistributions` gives.
+# What is left on `*` is left there because the
 # action refuses a resource or a condition — the ten CloudFront actions that
 # authorise against nothing else, the twelve whose resource types carry no tag,
 # the account-level enumerations, the log-delivery APIs — and not because nobody
@@ -1337,12 +1351,12 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # policies, the two response headers policies, and the viewer-request
   # function.
   #
-  # Enumerated rather than wildcarded, and split across the six CloudFront
+  # Enumerated rather than wildcarded, and split across the seven CloudFront
   # statements in this file rather than written as one, because "the resource cannot be narrowed"
   # is true of only part of this surface. Do not read it as a property of the
   # whole of it; the split is what keeps the parts distinguishable.
   #
-  # Ten of the thirty-four CloudFront actions across those six statements
+  # Ten of the thirty-four CloudFront actions across those seven statements
   # authorise against `*` and nothing else, per AWS's machine-readable service
   # reference — thirty-four being this CDN surface rather than everything the
   # role holds, since `ServiceLevelAccessForLogDelivery` further down grants a
@@ -1383,12 +1397,14 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # That argument used to keep the four distribution-typed actions here as well,
   # and the sentence it turned on was true: absent a condition, `distribution/*`
   # is another spelling of `*`. What changed is the condition, not the argument.
-  # `DeleteDistribution`, `UpdateDistribution`, `GetDistribution` and
-  # `GetDistributionConfig` now sit in `ManageSiteDistributions`, where the
-  # ARN pattern is doing no work but the `aws:ResourceTag/Name` condition beside
-  # it is. The twelve cache-policy, response-headers-policy and
-  # origin-access-control actions stay here because *their* resource types carry
-  # no tag this file could condition on: none of the three appears under
+  # `DeleteDistribution` and `UpdateDistribution` now sit in
+  # `ManageSiteDistributions`, where the ARN pattern is doing no work but the
+  # `aws:ResourceTag/Name` condition beside it is, and `GetDistribution` and
+  # `GetDistributionConfig` in `ReadSiteDistributions` beside it, where neither
+  # is — that statement is unconditioned on purpose and says why. The twelve
+  # cache-policy, response-headers-policy and origin-access-control actions stay
+  # here because *their* resource types carry no tag this file could condition
+  # on: none of the three appears under
   # `cloudfront:TagResource` in the service reference, which
   # `TagSiteCdnResources` enumerates in full. They are untaggable, so for them the original
   # argument still stands unchanged.
@@ -1508,8 +1524,10 @@ data "aws_iam_policy_document" "apply_infrastructure" {
     }
   }
 
-  # The four distribution-typed actions, held to this environment's own
-  # distributions by the tag they carry.
+  # The two destructive distribution-typed actions, held to this environment's
+  # own distributions by the tag they carry. The two reads used to sit here too
+  # and now sit in `ReadSiteDistributions` below, unconditioned, for the reason
+  # that statement gives.
   #
   # This is the grant the README used to name as the widest thing in the file,
   # and the reason it stayed wide was never that CloudFront refused to be
@@ -1533,9 +1551,13 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   #
   # That is evidence, not a contract. AWS publishes nothing about
   # authorization-time tag consistency for CloudFront, so this is one run on one
-  # date. If a future apply fails on `GetDistribution` seconds after a create,
-  # this is the statement to suspect, and the fallback is to move the two read
-  # actions back into `ManageCloudFront` and leave the two destructive ones here.
+  # date. The reads have since moved out for an unrelated reason — the
+  # post-delete poll `ReadSiteDistributions` below describes — which incidentally
+  # settles this too: a tag that is not yet readable can no longer deny a
+  # post-create poll, because no condition is evaluated on that call any more.
+  # The measurement is kept because it is still what answers the question for
+  # `UpdateDistribution`, which stays here and is issued against a distribution
+  # created on an earlier apply.
   #
   # `UpdateDistribution` is in the destructive half rather than the read half
   # despite the destroy path depending on it: the provider disables a
@@ -1550,8 +1572,6 @@ data "aws_iam_policy_document" "apply_infrastructure" {
 
     actions = [
       "cloudfront:DeleteDistribution",
-      "cloudfront:GetDistribution",
-      "cloudfront:GetDistributionConfig",
       "cloudfront:UpdateDistribution",
     ]
 
@@ -1562,6 +1582,62 @@ data "aws_iam_policy_document" "apply_infrastructure" {
       variable = "aws:ResourceTag/Name"
       values   = [local.site_name_tag_patterns_by_environment[each.key]]
     }
+  }
+
+  # The two distribution reads, deliberately unconditioned, because the call that
+  # needs them most is made after the tags are gone.
+  #
+  # The provider tears a distribution down in three steps: `disableDistribution`
+  # issues `UpdateDistribution`, `deleteDistribution` issues
+  # `DeleteDistribution`, and `waitDistributionDeleted` then polls
+  # `statusDistribution` -> `findDistributionByID` — a `GetDistribution` — until
+  # it answers `NoSuchDistribution`. All five symbols are in the pinned provider
+  # (6.62.0, `internal/service/cloudfront`); the disable half is cited at
+  # `distribution.go:1189-1215` in the statement above. By the time that poll
+  # runs the distribution is gone and so are its tags, an absent
+  # `aws:ResourceTag/Name` makes `StringLike` false, and nothing allows the call
+  # — so it returns `AccessDenied ... because no identity-based policy allows`,
+  # an implicit deny rather than the explicit one `DenyForeignDistributionRetag`
+  # produces. The distribution is genuinely destroyed; the run fails at the
+  # waiter and leaves a state entry that has to be cleared by hand. Seen on a
+  # real `make destroy-stage` on 2026-09-10, with the recovery written up in
+  # `docs/TEARDOWN.md` §5.5.
+  #
+  # In `e2e.yml` it is worse than one failed command, and be precise about why,
+  # because the obvious reading — that it files a false teardown report — is not
+  # the one that holds. The destroy dies at the waiter, so everything behind the
+  # distribution is still standing when the teardown verification runs: the
+  # report is *true*. What the workflow cannot do is clear it. The `cleanup` job
+  # re-runs the same `terraform destroy` under the same role, so it is refused at
+  # the same call, and the run ends in an `orphaned-resources` issue that only a
+  # human with `terraform state rm` can close. This is the neighbour of the false
+  # teardown reports `be1792c` and `08a6aba` each fixed once, and its opposite:
+  # there the label meant less than it said, here the orphan is manufactured by
+  # the policy rather than by the teardown.
+  #
+  # `GetDistributionConfig` is not implicated and moves anyway. The provider
+  # reads it before the delete, while the tags still exist, so the condition was
+  # satisfiable there. It comes along because it is the same class of call and
+  # keeping the two reads in one statement is how the next reader finds them,
+  # and because moving it removes a second latent race at no cost: what this
+  # gives up is the ability to refuse a read of a foreign distribution's
+  # configuration, which `cloudfront:ListDistributions` in `ManageCloudFront`
+  # already hands over on `*` in summary form.
+  #
+  # Do not put the condition back. The access control over this environment's
+  # distributions lives on the destroy and the update above, which are the calls
+  # that change something; a condition here would buy nothing a reader could
+  # name and would cost the teardown.
+  statement {
+    sid    = "ReadSiteDistributions"
+    effect = "Allow"
+
+    actions = [
+      "cloudfront:GetDistribution",
+      "cloudfront:GetDistributionConfig",
+    ]
+
+    resources = local.site_distribution_arns
   }
 
   # The five `function` actions that take an ARN, held to the namespace this
@@ -1685,8 +1761,8 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # `UntagResource`, separated from the two above and refused the one tag key
   # everything else in this policy now depends on.
   #
-  # The statements above condition four distribution actions on
-  # `aws:ResourceTag/Name`. That turns the `Name` tag into a key that this role
+  # The statement above conditions `DeleteDistribution` and `UpdateDistribution`
+  # on `aws:ResourceTag/Name`. That turns the `Name` tag into a key this role
   # must not be able to remove, because removing it is a one-call, irreversible
   # self-strand: `UntagResource` on `Name` succeeds, and from that moment
   # `DeleteDistribution` and `UpdateDistribution` are both denied against a
@@ -2844,6 +2920,27 @@ data "aws_iam_policy_document" "apply_identity" {
 # next plan. The margin is now thin enough that the next statement added to this
 # document should be measured before it is written, not after.
 #
+# `ReadSiteDistributions` is the 24th statement and was measured before it was
+# written, which is what the sentence above asks for. It is **+121 characters**
+# net on every apply role, and that figure is an estimate rather than a reading —
+# no plan was run for it, because planning this root needs the account. It is
+# arithmetic on the rendered form and it is tight arithmetic: the statement adds
+# 185 whitespace-stripped characters, counting the comma that separates it from
+# its neighbour in the `Statement` array and an account id of the usual 12
+# digits, and moving the two action strings out of `ManageSiteDistributions`
+# takes 64 back. That puts stage's infrastructure policy at **6,242** and the
+# three-policy total at **8,753 of 10,240** — 1,487 to spare, and **247 below
+# the 9,000 the check warns at**. Both environments move by the same 121: the
+# statement is character-identical in every rendering.
+#
+# 247 is the number to act on. It is not a failure — the check passes and the
+# real cap is 1,487 away — but it is under two statements of this size, so the
+# next addition to `apply_infrastructure` will very likely be the one that fires
+# the warning, and the escape below should be read before it is written rather
+# than after. Confirm the figure from what the check reports on the next plan of
+# this root; if that number disagrees with 8,753, the plan is right and this
+# paragraph is wrong.
+#
 # `aws_iam_policy.app_deploy_boundary` is the one exception to the first
 # sentence, and its own comment says why it has to be: the lifetime argument is
 # not merely inapplicable to it but inverted, since it is meant to outlive the
@@ -2878,12 +2975,19 @@ data "aws_iam_policy_document" "apply_identity" {
 # rather than concentrated in one ARN: the site bucket and its objects, the
 # contract parameter path, the access log groups, the CloudFront function (three
 # statements — the function actions and both tag statements name its ARN), the
-# tag conditions on the distribution create, the distribution actions, the
+# tag conditions on the distribution create, `ManageSiteDistributions`, the
 # certificate request and the certificate delete, and the two `Deny` statements
-# `DenyForeignDistributionRetag` and `DenyForeignCertificateRetag`. A mirror
-# copied from stage's rendering fails against prod at whichever of those it
-# reaches first — in practice `s3:CreateBucket`, naming a bucket outside the
-# pattern.
+# `DenyForeignDistributionRetag` and `DenyForeignCertificateRetag` — twelve
+# statements of the twenty-four. A mirror copied from stage's rendering fails
+# against prod at whichever of those it reaches first — in practice
+# `s3:CreateBucket`, naming a bucket outside the pattern.
+#
+# `ReadSiteDistributions` is deliberately not in that list, and the omission is
+# worth stating because it names distributions and the statement beside it does
+# diverge. It carries no condition and no per-environment ARN, so every
+# environment's rendering of it is character-identical; a mirror copies it
+# verbatim and is right by construction. It is the two destructive distribution
+# actions, not the reads, that a stage-shaped copy gets wrong against prod.
 #
 # So for all three: copy one environment's rendering verbatim. That is the
 # supported shape, and it is supported because it is the only one that holds

@@ -119,11 +119,17 @@ fails at the first CI run with an `AssumeRoleWithWebIdentity` error that gives n
 GitHub one: GitHub appears here only as the OIDC issuer that mints the token, and no role this
 repository creates has any access to your repositories.
 
-Inside AWS, the CI apply roles no longer reach a distribution or a certificate that is not theirs.
-`cloudfront:DeleteDistribution`, `UpdateDistribution`, `GetDistribution` and `GetDistributionConfig`
-are conditioned on `aws:ResourceTag/Name` matching `<name_prefix>-site-<env>-*`, and
-`acm:DeleteCertificate` on the same pattern — so a pre-existing distribution or certificate in the
-same account is outside the blast radius of a bad merge, and so is the *other* environment's.
+Inside AWS, the CI apply roles no longer *change* a distribution or a certificate that is not
+theirs. `cloudfront:DeleteDistribution` and `UpdateDistribution` are conditioned on
+`aws:ResourceTag/Name` matching `<name_prefix>-site-<env>-*`, and `acm:DeleteCertificate` on the
+same pattern — so a pre-existing distribution or certificate in the same account is outside the
+blast radius of a bad merge, and so is the *other* environment's. The two reads,
+`cloudfront:GetDistribution` and `GetDistributionConfig`, are deliberately left unconditioned:
+the provider polls `GetDistribution` *after* the delete, when the distribution has no tags left
+for a condition to match, so gating the read fails every teardown against a resource that is
+already gone. The apply roles can therefore read any distribution in the account, and delete or
+reconfigure none but their own; the tag reach that remains is priced in `## Tradeoffs` below, and
+`docs/TEARDOWN.md` §5.5 carries the teardown that settled the read.
 
 What stays account-wide is the CloudFront surface that carries no tag to condition on: the apply
 roles can create, read, update and delete **cache policies, response headers policies and origin
@@ -413,18 +419,23 @@ Specific ones, with what each buys and what it would cost to choose differently.
   surface is wider than the CloudFront grants above. Seven statements in `apply_infrastructure`
   are written on `*` with nothing narrowing them to an environment: `ManageCloudFront`,
   `ListCertificates`, `ResolveDnsChangesAndZones`, `ListParameters`, `ManageLogDelivery`,
-  `ManageVendedLogDeliveryPolicy` and `VerifyTeardownByTag`. Three more are written on
+  `ManageVendedLogDeliveryPolicy` and `VerifyTeardownByTag`. Four more are written on
   `local.site_distribution_arns`, which is the single ARN `distribution/*` and so admits the same
-  set of requests `*` does: `ServiceLevelAccessForLogDelivery`, and the distribution halves of
-  `TagSiteCdnResources` and `UntagSiteCdnResources`. Three more again are scoped to a resource
-  type but not to an environment — `ManageCertificates` and `UntagSiteCertificates` to
-  `certificate/*`, `ManageDnsRecords` to `hostedzone/*`. Those are shared surface in the same
-  practical sense, precisely because of what the wildcard names: a resource type, not an
-  environment. Each role reaches every certificate and every hosted zone in the account.
+  set of requests `*` does: `ServiceLevelAccessForLogDelivery`, `ReadSiteDistributions`, and the
+  distribution halves of `TagSiteCdnResources` and `UntagSiteCdnResources`. The newest of those
+  four is unconditioned on purpose rather than by omission: `GetDistribution` is polled *after*
+  the delete, when the distribution has no tags left for a condition to read, so a tag gate there
+  fails every teardown against a distribution that is in fact already gone. It reads and only
+  reads; `bootstrap/oidc.tf` argues it at the statement and `docs/TEARDOWN.md` §5.5 carries the
+  teardown it was written from. Three more again are scoped to a resource type but not to an
+  environment — `ManageCertificates` and `UntagSiteCertificates` to `certificate/*`,
+  `ManageDnsRecords` to `hostedzone/*`. Those are shared surface in the same practical sense,
+  precisely because of what the wildcard names: a resource type, not an environment. Each role
+  reaches every certificate and every hosted zone in the account.
   `UntagSiteCertificates` does carry a condition, on `aws:TagKeys`, as `UntagSiteCdnResources`
   does in the group above it — but both protect a tag key from removal rather than narrowing the
   statement to one environment, which is the criterion this list is drawn on. On none of the
-  thirteen is one environment's role narrower than the other's: each reaches the whole account.
+  fourteen is one environment's role narrower than the other's: each reaches the whole account.
   `CreateSiteDistribution` and `RequestCertificates` are written on `*` too and are deliberately
   not in that list, because each carries an `aws:RequestTag/Name` condition holding it to its own
   environment's pattern, as `ManageSiteDistributions` and `DeleteSiteCertificates` do with
