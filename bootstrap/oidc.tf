@@ -1109,8 +1109,8 @@ resource "aws_iam_role" "apply" {
   # runs on two hours because those steps request it, not because this line
   # permits it. Of the two credential steps that ask for nothing, only one
   # assumes this role at all: apply.yml's plan job, capped at twenty minutes,
-  # which is well inside even the action's default hour. The other is plan.yml,
-  # which assumes the plan role, whose own ceiling is 3600.
+  # which is well inside even the action's default hour. The other is in
+  # plan.yml, whose plan job assumes the plan role, whose own ceiling is 3600.
   max_session_duration = 7200
 }
 
@@ -1656,6 +1656,17 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # the bootstrap has already been hand-applied. This comment is the only
   # warning a future editor gets, which is why it is here rather than in a commit
   # message.
+  #
+  # A `Deny` beside this statement is not the thing that instruction forbids, and
+  # `DenyForeignDistributionRetag` below is that `Deny`. What breaks the create is
+  # a condition on *this* `Allow`: an unmatched condition here withholds the
+  # grant, and `CreateDistributionWithTags` needs `cloudfront:TagResource` granted
+  # at the moment the distribution has no tags to read. A separate `Deny` guarded
+  # by a `Null` test on the same key does the opposite — it is inert wherever the
+  # key is absent, which is exactly the create — and bites only on a distribution
+  # that already exists and carries someone else's `Name`. That statement's own
+  # comment carries the argument in full, including what it does not prove. The
+  # instruction above is unaffected by it and stands unchanged: no condition here.
   statement {
     sid    = "TagSiteCdnResources"
     effect = "Allow"
@@ -1725,6 +1736,109 @@ data "aws_iam_policy_document" "apply_infrastructure" {
       test     = "ForAllValues:StringNotEquals"
       variable = "aws:TagKeys"
       values   = ["Name"]
+    }
+  }
+
+  # The `Deny` written to stop the distribution tag condition from being walked
+  # around. Whether it does is not known, and the section headed "Believed to
+  # close" below is the load-bearing part of this comment.
+  #
+  # `ManageSiteDistributions` holds `DeleteDistribution` and `UpdateDistribution`
+  # to distributions whose `Name` matches this environment's pattern, while
+  # `TagSiteCdnResources` grants `cloudfront:TagResource` on `distribution/*`
+  # with nothing narrowing it. Those two facts compose: stage's role could retag
+  # prod's standing distribution into stage's `Name` namespace and then disable
+  # or delete it, in two calls, holding no other credential. The tag condition is
+  # a per-environment accident guard, and this is the walk-around that kept it
+  # from being anything more.
+  #
+  # ---------------------------------------------------------------------------
+  # The `Null` test is the whole design. Do not remove it, and do not "simplify"
+  # this to a bare `StringNotLike`.
+  # ---------------------------------------------------------------------------
+  #
+  # The comment above `TagSiteCdnResources` sets out at length why a resource-tag
+  # condition on *that* `Allow` breaks every create: the provider calls
+  # `CreateDistributionWithTags`, which authorises `cloudfront:CreateDistribution`
+  # and `cloudfront:TagResource` together against a distribution that does not
+  # exist yet, so `aws:ResourceTag/Name` is absent and any test on it fails. That
+  # instruction is about the `Allow`, and this statement honours it literally —
+  # the `Allow` is untouched. What a separate `Deny` can do that a condition on
+  # the `Allow` cannot is stay inert on the create path. The two conditions here
+  # are AND-ed: with the key absent the `Null` test is false, the `Deny` does not
+  # apply, and the create is authorised exactly as before. Against a distribution
+  # that already exists the key is present, the `Null` test is true, and if the
+  # tag does not match this environment's pattern the `Deny` fires — and an
+  # explicit `Deny` beats the `Allow` beside it. A bare `StringNotLike` would be
+  # true on the absent key and would deny every create: the same failure the
+  # `Allow`'s comment warns about, arriving from the other direction. Note that
+  # what this bites on is a `Name` outside this environment's pattern, which is
+  # not quite the same set as "somebody else's distribution" — see the residual
+  # at the end.
+  #
+  # ---------------------------------------------------------------------------
+  # Believed to close the retag-then-delete path. Unmeasured, and it fails
+  # silently if the belief is wrong.
+  # ---------------------------------------------------------------------------
+  #
+  # The Service Authorization Reference, read on 2026-09-09, says
+  # `cloudfront:TagResource` takes the `distribution` resource type and that the
+  # type declares `aws:ResourceTag/${TagKey}` — so the key is conditionable and
+  # this is not the ACM-style mistake of naming a key an action does not carry.
+  # What is documented nowhere is whether IAM actually populates that key in the
+  # authorization context for a `TagResource` call against a standing
+  # distribution. If it does not, the `Null` test is false on every request, this
+  # statement never fires, and nothing changes — with no error, no failed run and
+  # nothing in a plan to notice. Every claim made for it, here and in README.md,
+  # is written as "believed to close" for that reason, and none of them should be
+  # rewritten as settled fact until the probe below has been run.
+  #
+  # What would settle it: a stage cycle run under a session policy carrying this
+  # `Deny`, showing the create and destroy paths untouched, plus one manual
+  # `cloudfront:TagResource` against a distribution tagged outside stage's
+  # pattern, expected to be denied. The first half is the same shape of probe
+  # that measured the post-create tag-read window on 2026-09-05; the second half
+  # needs a foreign-tagged distribution to exist, which is why it has not been
+  # run.
+  #
+  # Named residual, which the `Null` test creates rather than merely leaves
+  # behind: a distribution carrying no `Name` tag at all is outside this `Deny`
+  # and can still be retagged into scope and then deleted. Every distribution
+  # this repository creates carries `Name` — `CreateSiteDistribution` refuses a
+  # create without one via `aws:RequestTag/Name`, and `UntagSiteCdnResources`
+  # refuses to remove it — so the stage-reaches-prod case is believed closed. An
+  # untagged distribution belonging to something else in the account is not, and
+  # closing that would mean denying `TagResource` wherever the key is absent,
+  # which is the create.
+  #
+  # A second residual of the same family is left open here, named so that it is
+  # not read as closed by association. `UntagSiteCdnResources` reaches
+  # `distribution/*` and `UntagSiteCertificates` reaches `certificate/*` with
+  # nothing but `aws:TagKeys` holding them, so this role can still strip `Project`
+  # and `Env` from another environment's standing distribution or certificate.
+  # That is not a delete path — `Name` is the key the delete conditions read, and
+  # those statements refuse to remove it — but `UntagSiteCdnResources`'s own
+  # verdict that losing `Project` or `Env` is "recoverable by a credential this
+  # role still holds" is true of this environment's resources and false of a
+  # foreign one, and what it costs there is the tag query the teardown assertion
+  # runs on.
+  statement {
+    sid       = "DenyForeignDistributionRetag"
+    effect    = "Deny"
+    actions   = ["cloudfront:TagResource"]
+    resources = local.site_distribution_arns
+
+    # Present, and not this environment's. Both, or the create breaks.
+    condition {
+      test     = "Null"
+      variable = "aws:ResourceTag/Name"
+      values   = ["false"]
+    }
+
+    condition {
+      test     = "StringNotLike"
+      variable = "aws:ResourceTag/Name"
+      values   = [local.site_name_tag_patterns_by_environment[each.key]]
     }
   }
 
@@ -1839,6 +1953,58 @@ data "aws_iam_policy_document" "apply_infrastructure" {
       test     = "ForAllValues:StringNotEquals"
       variable = "aws:TagKeys"
       values   = ["Name"]
+    }
+  }
+
+  # The ACM half of `DenyForeignDistributionRetag`, against the same walk-around
+  # in the other service.
+  #
+  # `ManageCertificates` grants `acm:AddTagsToCertificate` on `certificate/*`
+  # with no condition, beside a `DeleteSiteCertificates` gated on
+  # `aws:ResourceTag/Name` — the identical shape, so the identical two-call path:
+  # tag a foreign certificate into this environment's namespace, then delete it.
+  # `DeleteSiteCertificates` prices that deletion honestly, and the price is why
+  # this is worth a statement on a path nothing has ever run.
+  #
+  # The `Null` guard is here for the same reason and carries the same weight; the
+  # CloudFront statement's comment is the full argument and is not repeated. What
+  # it guards is not the same call, though, and the difference is worth being
+  # exact about. `acm:RequestCertificate` is a different action, is not named
+  # here, and is outside this `Deny` whatever the key does — the provider sends
+  # the certificate's tags on the request itself
+  # (`internal/service/acm/certificate.go:406-409`), so there is no create-time
+  # `AddTagsToCertificate` to deny. What the `Null` test protects is any
+  # `AddTagsToCertificate` the provider issues against a certificate whose tags
+  # are not yet readable at authorisation time: the same unknown as the
+  # CloudFront case, reached by a different route.
+  #
+  # Believed to close it; unmeasured, on both counts. The Service Authorization
+  # Reference (2026-09-09) has `acm:AddTagsToCertificate` taking the
+  # `certificate` resource type, which declares `aws:ResourceTag/${TagKey}`, so
+  # the condition is well formed — but whether IAM populates the key for this
+  # action is undocumented, and the module's ACM path has never been applied in
+  # CI or by hand, so nothing this statement guards has ever been exercised. The
+  # residual is the CloudFront one unchanged: a certificate carrying no `Name`
+  # tag is outside this `Deny`. Every certificate this repository requests carries one, because
+  # `RequestCertificates` conditions the request on `aws:RequestTag/Name` and
+  # `UntagSiteCertificates` refuses to remove it.
+  statement {
+    sid       = "DenyForeignCertificateRetag"
+    effect    = "Deny"
+    actions   = ["acm:AddTagsToCertificate"]
+    resources = ["arn:${data.aws_partition.current.partition}:acm:*:${data.aws_caller_identity.current.account_id}:certificate/*"]
+
+    # Present, and not this environment's. Both, for the reason above.
+    condition {
+      test     = "Null"
+      variable = "aws:ResourceTag/Name"
+      values   = ["false"]
+    }
+
+    condition {
+      test     = "StringNotLike"
+      variable = "aws:ResourceTag/Name"
+      values   = [local.site_name_tag_patterns_by_environment[each.key]]
     }
   }
 
@@ -2668,7 +2834,18 @@ data "aws_iam_policy_document" "apply_identity" {
 # was 4,514 across 16 statements before them and is 5,589 across 21 now, while
 # the other two did not change. The cap is real and worth an assertion, and the
 # margin is no longer generous — `check "apply_inline_policies_fit_the_cap"`
-# fires at 9,000, which is 900 above where this sits.
+# fires at 9,000, which is 900 above where that stood.
+#
+# `DenyForeignDistributionRetag` and `DenyForeignCertificateRetag` take that to
+# 23 statements and add 532 characters to stage's infrastructure policy and 530
+# to prod's, putting stage at 6,121 and the three-policy total at 8,632 of
+# 10,240 — 1,608 to spare, and 368 below the 9,000 the check warns at. That is
+# an arithmetic projection, not a reading: it was computed by adding the two
+# statements to the applied stage and prod renderings recorded in this root's
+# state and re-measuring with whitespace stripped, which is the same operation
+# the check performs, on the same text the provider produced. It is not a substitute for what the check reports on the
+# next plan. The margin is now thin enough that the next statement added to this
+# document should be measured before it is written, not after.
 #
 # `aws_iam_policy.app_deploy_boundary` is the one exception to the first
 # sentence, and its own comment says why it has to be: the lifetime argument is
@@ -2700,13 +2877,16 @@ data "aws_iam_policy_document" "apply_identity" {
 # does not mention anywhere.
 #
 # `apply_infrastructure` is rendered per environment too, and it is the one whose
-# divergence is easiest to miss because it is spread across seven grants rather
-# than concentrated in one ARN: the site bucket and its objects, the contract
-# parameter path, the access log groups, the CloudFront function, and the tag
-# conditions on the distribution create, the distribution actions and the
-# certificate delete. A mirror copied from stage's rendering fails against prod
-# at whichever of those it reaches first — in practice `s3:CreateBucket`, naming
-# a bucket outside the pattern.
+# divergence is easiest to miss because it is spread across a dozen statements
+# rather than concentrated in one ARN: the site bucket and its objects, the
+# contract parameter path, the access log groups, the CloudFront function (three
+# statements — the function actions and both tag statements name its ARN), the
+# tag conditions on the distribution create, the distribution actions, the
+# certificate request and the certificate delete, and the two `Deny` statements
+# `DenyForeignDistributionRetag` and `DenyForeignCertificateRetag`. A mirror
+# copied from stage's rendering fails against prod at whichever of those it
+# reaches first — in practice `s3:CreateBucket`, naming a bucket outside the
+# pattern.
 #
 # So for all three: copy one environment's rendering verbatim. That is the
 # supported shape, and it is supported because it is the only one that holds
@@ -2726,6 +2906,24 @@ data "aws_iam_policy_document" "apply_identity" {
 # instead of merging it, which is a judgement no merge script makes on its own.
 # One was written on 2026-09-07 and produced exactly that document; it was
 # caught by reading the result, not by trusting the tool that built it.
+#
+# There are now three statements with that property rather than one, and the two
+# new ones fail in a way that is quieter than a role which reads nothing.
+# `DenyForeignDistributionRetag` and `DenyForeignCertificateRetag` each deny a
+# tag-add wherever `aws:ResourceTag/Name` is present and does not match *this*
+# environment's pattern. Union stage's copy with prod's and every tagged
+# distribution in the account would be caught by one or the other, including each
+# environment's own: stage's distribution would fail prod's copy, prod's would
+# fail stage's. The result would be a role that creates a distribution
+# successfully — the `Null` guard keeps the create clear — and would then be
+# denied every subsequent `TagResource` against it. Written in the conditional
+# because it rests on the same unmeasured belief the statements themselves do:
+# if IAM does not populate the key, neither the protection nor this hazard
+# exists. That is an argument for not merging them rather than against, since
+# the document does not say which way it will go. Dropping them is the safe
+# minimum. The correct union is one statement per service whose `StringNotLike`
+# carries *both* patterns as values, which denies only a `Name` matching neither, because a negated string
+# operator over several values requires the key to match none of them.
 #
 # Edit any of these documents and re-sync every mirror of it in the same change,
 # not a follow-up one. A mirror that has fallen behind does not

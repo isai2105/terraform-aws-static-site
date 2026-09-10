@@ -901,6 +901,11 @@ jobs:
       # destroy proceeds on the credential it has always run on — the same
       # fallback the unreadable-output path takes.
       #
+      # Fail-open here is about the ordering, not about the verdict. The destroy
+      # is never skipped for a failed narrowing — but the last step in this job
+      # fails the run on that same failure once the destroy has finished, so a
+      # narrowing that has quietly stopped working cannot stay green forever.
+      #
       # The `!= ''` half is that other fallback: when the policy could not be
       # built this step is skipped, and a skipped step also leaves
       # "Apply the plan" running. This control is defence-in-depth, not a
@@ -924,18 +929,30 @@ jobs:
           #
           # Note the asymmetry with the step before `init`: a duration STS
           # refuses there is a red step and a stopped job, but
-          # `continue-on-error` here would swallow the same refusal into the
-          # warning below and let the destroy run unnarrowed. This is the one
-          # number in this step that can be got wrong quietly.
+          # `continue-on-error` here swallows the same refusal into the warning
+          # below and lets the destroy run unnarrowed. Every input in this step
+          # can be got wrong that quietly, not merely some of them: this
+          # duration, `role-to-assume`, `role-session-name`, `aws-region` and
+          # `inline-session-policy` are the whole set, and one
+          # `continue-on-error` swallows all five alike.
+          #
+          # Quietly means "without stopping the destroy", which is as far as it
+          # goes: the last step in this job still fails the run afterwards.
           role-duration-seconds: 7200
           inline-session-policy: ${{ steps.session-policy.outputs.session-policy }}
 
       # `continue-on-error` hides the failure from the job's status, which is
       # the whole point of it — so the failure is re-surfaced here as a warning
-      # instead. Without this the narrowing could stop working entirely and
-      # every run would still be green. The action leaves the credentials it did
-      # not replace in place, so the destroy that follows runs on the wide
-      # session assumed before `init`, which is the documented fallback.
+      # instead. This step carries the explanation; the last step in the job
+      # carries the verdict and turns the same failure red.
+      #
+      # Two steps rather than one, deliberately. Exiting non-zero here would
+      # make `success()` false for "Apply the plan" below, which carries that
+      # default and would therefore be skipped — the exact outcome the
+      # `continue-on-error` above exists to prevent. The action leaves the
+      # credentials it did not replace in place, so the destroy that follows
+      # runs on the wide session assumed before `init`, which is the documented
+      # fallback.
       - name: Warn if the destroy could not be narrowed
         if: always() && steps.reassume.outcome == 'failure'
         shell: bash
@@ -965,3 +982,36 @@ jobs:
             -input=false \
             -lock-timeout=10m \
             terraform.tfplan
+
+      # Last in the job, after the destroy, and the placement is the whole
+      # design. A failed narrowing must not stop a teardown — that is what
+      # `continue-on-error` on the re-assume is for, and a step exiting non-zero
+      # anywhere before "Apply the plan" above would make `success()` false for
+      # it and skip the destroy outright. But a run where the narrowing has
+      # quietly stopped working forever looks exactly like a run where STS
+      # blipped once, and until this step both were green. This is what
+      # separates them, and by the time it runs there is nothing left of the
+      # job for it to interfere with.
+      #
+      # `failure`, never `skipped`. The re-assume is skipped on an apply, and
+      # skipped again when the session policy could not be built; both are
+      # documented fallbacks, both have already been warned about, and both stay
+      # green.
+      #
+      # It masks nothing. Being last, anything that failed before it has already
+      # failed, and a job reports every failed step rather than only its final
+      # one — a destroy that failed on its own is still red on its own step.
+      # Nothing `needs:` this job, so nothing downstream changes either.
+      - name: Fail the run because the destroy was not narrowed
+        if: always() && steps.reassume.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::the narrowed re-assume failed, so this destroy ran on" \
+            "the unnarrowed apply credential. The destroy itself was not" \
+            "skipped: it ran, and the environment came down with it unless the" \
+            "apply step above says otherwise. This run is red for a broken" \
+            "defence-in-depth control, not for a failed teardown — there are no" \
+            "orphaned resources to go hunting for on account of this step. The" \
+            "warning above carries the underlying STS failure, and" \
+            "docs/CLOUDFRONT_IAM_SCOPING_PLAN.md A4 the control itself."
+          exit 1

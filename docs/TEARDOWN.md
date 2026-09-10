@@ -123,13 +123,18 @@ destroy — `apply.yml`'s `apply` job, `e2e.yml`'s `lifecycle` job, which applie
 destroys in one, and `e2e.yml`'s `cleanup` job, which re-attempts a teardown that did not come
 back clean. Each re-assumes the apply role immediately before the destroy, narrowed by a session
 policy, and each does so fail-open: a re-assume that is skipped or fails leaves the destroy
-running on the credential the job already held. Each of those three jobs' two credential steps —
-the assume before `init` and the narrowed re-assume — sets `role-duration-seconds` to 7200, the
-role's full `max_session_duration`, rather than the hour `aws-actions/configure-aws-credentials`
-sends when the input is unset; the jobs themselves carry `timeout-minutes: 120`, sized against the
-provider's 90-minute CloudFront deletion waiter. The two credential steps that do not ask for more
-are plan-only: `plan.yml` assumes the plan role, capped at 3600, and `apply.yml`'s plan job is
-capped at twenty minutes.
+running on the credential the job already held. Fail-open about the destroy, not about the run —
+a re-assume that *fails* is re-surfaced as a warning beside it and then fails the run from a step
+at the very end of the job, after the destroy and after everything that reads its result, so a
+narrowing that has silently stopped working cannot go on being green. A re-assume that is
+*skipped*, which is what an unbuildable session policy produces, warns and leaves the run green:
+that one is the documented fallback rather than a broken control. Each of those three jobs' two
+credential steps — the assume before `init` and the narrowed re-assume — sets
+`role-duration-seconds` to 7200, the role's full `max_session_duration`, rather than the hour
+`aws-actions/configure-aws-credentials` sends when the input is unset; the jobs themselves carry
+`timeout-minutes: 120`, sized against the provider's 90-minute CloudFront deletion waiter. The two
+credential steps that do not ask for more are plan-only: `plan.yml` assumes the plan role, capped
+at 3600, and `apply.yml`'s plan job is capped at twenty minutes.
 
 One measured constraint that surprises people, because it contradicts the role's own
 configuration: **a role assumed from another session — an MFA `sts:GetSessionToken` session, for
@@ -646,14 +651,21 @@ types carry no tag to condition on.
 
 **The condition is a guard against accidents, not against an attacker holding the credential**,
 and the reason is worth keeping in front of anyone reading this section.
-`TagSiteCdnResources` grants `cloudfront:TagResource` on `distribution/*` unconditioned and
+`TagSiteCdnResources` grants `cloudfront:TagResource` on `distribution/*`, and that `Allow`
 cannot be conditioned, because `CreateDistributionWithTags` authorises the create and the tag
-together against a resource that does not exist yet. A foreign distribution can therefore be
-retagged into scope and then deleted, in two calls. What the condition closes is the accident
-this section is actually about — a bad merge, a `-target` typo, a destroy pointed at the wrong
-root. `UntagSiteCdnResources` closes the matching self-inflicted case in the other direction: the
-role cannot remove the `Name` tag it now depends on, which would otherwise strand a standing
-distribution in one call.
+together against a resource that does not exist yet. A foreign distribution could therefore be
+retagged into scope and then deleted, in two calls. `DenyForeignDistributionRetag` is a separate
+`Deny` on the same action, guarded by a `Null` test on `aws:ResourceTag/Name` so that it is inert
+wherever the key is absent — which is precisely the create — and fires only against a
+distribution that already exists and carries a `Name` outside this environment's pattern. It is
+*believed* to close that path and has not been measured: nothing AWS publishes says the key is
+populated in the authorization context for `TagResource`, and if it is not, the deny never fires
+and says nothing. A distribution carrying no `Name` tag at all is outside it either way. So the
+sentence this paragraph opens with still stands as written. What the condition closes is the
+accident this section is actually about — a bad merge, a `-target` typo, a destroy pointed at the
+wrong root. `UntagSiteCdnResources` closes the matching self-inflicted case in the other
+direction: the role cannot remove the `Name` tag it now depends on, which would otherwise strand a
+standing distribution in one call.
 
 ### 6.4 One thing this checklist cannot tell you
 
