@@ -2921,25 +2921,26 @@ data "aws_iam_policy_document" "apply_identity" {
 # document should be measured before it is written, not after.
 #
 # `ReadSiteDistributions` is the 24th statement and was measured before it was
-# written, which is what the sentence above asks for. It is **+121 characters**
-# net on every apply role, and that figure is an estimate rather than a reading —
-# no plan was run for it, because planning this root needs the account. It is
-# arithmetic on the rendered form and it is tight arithmetic: the statement adds
-# 185 whitespace-stripped characters, counting the comma that separates it from
-# its neighbour in the `Statement` array and an account id of the usual 12
-# digits, and moving the two action strings out of `ManageSiteDistributions`
-# takes 64 back. That puts stage's infrastructure policy at **6,242** and the
-# three-policy total at **8,753 of 10,240** — 1,487 to spare, and **247 below
-# the 9,000 the check warns at**. Both environments move by the same 121: the
-# statement is character-identical in every rendering.
+# written, which is what the sentence above asks for — and has now been
+# confirmed against the roles themselves. `bootstrap/` was applied by hand on
+# 2026-09-10 (0 added, 2 changed, 0 destroyed) and the three inline policies on
+# both live apply roles were read back with `aws iam get-role-policy` and
+# measured with whitespace stripped: a reading off IAM, not a projection from a
+# plan. Stage carries identity 1,447, terraform-state 1,064 and infrastructure
+# 6,242 — **8,753 of 10,240**, 1,487 to spare and **247 below the 9,000 the
+# check warns at**. Prod carries 1,445, 1,064 and 6,228 — 8,737, 1,503 to spare
+# and 263 below the warning. The statement cost the +121 net it was estimated
+# at, and both environments moved by that same 121, since it renders identically
+# in each. Their totals are not equal even so: of the 16 between them, 14 is
+# infrastructure and 2 identity, where `prod` stands in for `stage`, and
+# terraform-state is symmetric.
 #
-# 247 is the number to act on. It is not a failure — the check passes and the
-# real cap is 1,487 away — but it is under two statements of this size, so the
-# next addition to `apply_infrastructure` will very likely be the one that fires
-# the warning, and the escape below should be read before it is written rather
-# than after. Confirm the figure from what the check reports on the next plan of
-# this root; if that number disagrees with 8,753, the plan is right and this
-# paragraph is wrong.
+# 247 is the number to act on, since it is the tighter of the two. It is not a
+# failure — the check passes and the real cap is 1,487 away — but infrastructure
+# carries its 24 statements in 6,242 characters, a mean of 260, so 247 is under
+# one more statement of average size, and the next addition to
+# `apply_infrastructure` will very likely be the one that fires the warning.
+# Measure it, and read the escape below, before it is written rather than after.
 #
 # `aws_iam_policy.app_deploy_boundary` is the one exception to the first
 # sentence, and its own comment says why it has to be: the lifetime argument is
