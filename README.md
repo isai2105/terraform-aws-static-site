@@ -130,7 +130,10 @@ roles can create, read, update and delete **cache policies, response headers pol
 access controls** anywhere in the account. None of those three resource types is taggable, so
 there is nothing to scope them by; `bootstrap/oidc.tf` says so at the statement that grants them.
 Deleting a cache policy another distribution is using is a real way to break something outside this
-repository. That is defensible in a dedicated AWS account and only there.
+repository. That is defensible in a dedicated AWS account and only there. The same statement
+carries `cloudfront:CreateFunction` and the five account-level `List*` calls on `*` as well, for a
+different reason — a create has no ARN to name yet and a list has none at all — while the five
+function actions that do take one are scoped to `function/<name_prefix>-site-<env>-*`.
 
 ### 1. Bootstrap — once, by hand
 
@@ -406,10 +409,24 @@ Specific ones, with what each buys and what it would cost to choose differently.
   boundary.** Nearly every resource is named `<name_prefix>-site-<env>-…`, each environment keeps
   state under its own `<env>/terraform.tfstate` key, and each has its own apply role, trusted on
   its own `environment:<env>` OIDC subject and granted nothing on the other's state. That is real
-  isolation of the identity and the state, and it is not a blast-radius boundary: the
-  account-wide CloudFront grants above are shared between them, and the two CloudFront policy
-  quotas are per account, so two environments hold 4 of 20 in each. Separate accounts are the
-  correct answer for anything durable, and are a different project.
+  isolation of the identity and the state, and it is not a blast-radius boundary — and the shared
+  surface is wider than the CloudFront grants above. Seven statements in `apply_infrastructure`
+  are written on `*` with nothing narrowing them to an environment: `ManageCloudFront`,
+  `ListCertificates`, `ResolveDnsChangesAndZones`, `ListParameters`, `ManageLogDelivery`,
+  `ManageVendedLogDeliveryPolicy` and `VerifyTeardownByTag`. Three more are written on
+  `local.site_distribution_arns`, which is the single ARN `distribution/*` and so admits the same
+  set of requests `*` does: `ServiceLevelAccessForLogDelivery`, and the distribution halves of
+  `TagSiteCdnResources` and `UntagSiteCdnResources`. On none of the ten is one environment's role
+  narrower than the other's: each reaches the whole account. `CreateSiteDistribution` and
+  `RequestCertificates` are written on `*` too and are deliberately not in that list, because each
+  carries an `aws:RequestTag/Name` condition holding it to its own environment's pattern, as
+  `ManageSiteDistributions` and `DeleteSiteCertificates` do with `aws:ResourceTag/Name`. Those tag
+  conditions are per-environment accident guards rather than boundaries, and `docs/TEARDOWN.md`
+  §6.3 prices the difference: `TagSiteCdnResources` carries `cloudfront:TagResource` on
+  `distribution/*` unconditioned, so a foreign distribution can be tagged into scope first and
+  then acted on. And the two CloudFront policy quotas are per account, so two environments hold
+  4 of 20 in each. Separate accounts are the correct answer for anything durable, and are a
+  different project.
 
   **"Nearly" is load-bearing: a cleanup sweep written from the pattern alone would miss five of
   the twenty-three outright and stumble on a sixth.** The three SSM parameters are
