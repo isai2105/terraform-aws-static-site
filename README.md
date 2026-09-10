@@ -431,15 +431,18 @@ Specific ones, with what each buys and what it would cost to choose differently.
   `aws:ResourceTag/Name`. Those tag conditions are per-environment accident guards rather than
   boundaries, and `docs/TEARDOWN.md` §6.3 prices the difference: the tag grants reach
   `distribution/*` and `certificate/*`, so a foreign resource could be tagged into scope first and
-  then acted on. `DenyForeignDistributionRetag` and `DenyForeignCertificateRetag` are *believed*
-  to close that pair of paths and have not been measured — each denies the tag-add wherever a
-  `Name` tag is present and does not match this environment's pattern, guarded by a `Null` test on
-  the same key so that a create, whose resource has no tags to read yet, is untouched. Read them
-  as unproven: if IAM does not populate `aws:ResourceTag/Name` for those actions the denies never
-  fire, and they fail that way silently. A resource carrying no `Name` tag at all stays reachable
-  by design; everything this repository creates carries one. And the two CloudFront policy quotas
-  are per account, so two environments hold 4 of 20 in each. Separate accounts are the correct
-  answer for anything durable, and are a different project.
+  then acted on. `DenyForeignDistributionRetag` and `DenyForeignCertificateRetag` are written to
+  close that pair of paths — each denies the tag-add wherever a `Name` tag is present and does not
+  match this environment's pattern, guarded by a `Null` test on the same key so that a create,
+  whose resource has no tags to read yet, is untouched. The CloudFront half was measured on
+  2026-09-10: tagging the environment's own distribution succeeded, and the same call against that
+  distribution once its `Name` was prod-shaped was refused "with an explicit deny in an
+  identity-based policy". Read the ACM half as still unproven — whether IAM populates
+  `aws:ResourceTag/Name` is decided per service, so the CloudFront result does not transfer — and
+  if it does not, that deny never fires and fails that way silently. A resource carrying no `Name`
+  tag at all stays reachable by design; everything this repository creates carries one. And the
+  two CloudFront policy quotas are per account, so two environments hold 4 of 20 in each. Separate
+  accounts are the correct answer for anything durable, and are a different project.
 
   **"Nearly" is load-bearing: a cleanup sweep written from the pattern alone would miss five of
   the twenty-three outright and stumble on a sixth.** The three SSM parameters are
