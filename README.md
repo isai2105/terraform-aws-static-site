@@ -92,7 +92,7 @@ in its own repository; see the tradeoffs section for why it is not a third envir
 | `docs/TEARDOWN.md` | Taking it down: destroy order across the three layers, the measured CloudFront teardown, recovering an interrupted destroy, the eleven-row post-destroy orphan sweep, and the three-phase removal of the bootstrap's own `prevent_destroy` guard. |
 | `docs/DEPLOY_CONTRACT.md` | The interface `react-cloudfront-app` is written against: the deploy role and its trust subject, the SSM parameter names, the four-command upload sequence, and the CSP both repositories have to agree on. |
 | `Makefile` | Every check and every environment verb. `make help` lists them. CI invokes these targets rather than reimplementing them, so a local run and a green check are the same command. |
-| `.github/workflows/` | `validate.yml` (nine AWS-free jobs), `plan.yml` (a plan per environment a pull request changes), `apply.yml` (dispatch-only apply *or* destroy, gated on a GitHub Environment), `e2e.yml` (dispatch-only full lifecycle against real AWS, its weekly schedule commented out), `provider-lock-refresh.yml` (monthly, plus on demand: re-resolves all five committed lock files and opens the result as a pull request). |
+| `.github/workflows/` | `validate.yml` (ten AWS-free jobs), `plan.yml` (a plan per environment a pull request changes), `apply.yml` (dispatch-only apply *or* destroy, gated on a GitHub Environment), `e2e.yml` (dispatch-only full lifecycle against real AWS, its weekly schedule commented out), `provider-lock-refresh.yml` (monthly, plus on demand: re-resolves all five committed lock files and opens the result as a pull request). |
 
 ---
 
@@ -257,23 +257,28 @@ destroys measured on 2026-08-27 was killed 90 seconds in, which cost a stranded 
 recovery — `docs/TEARDOWN.md` section 5 is that recovery, written from the real event.
 
 **A destroy exiting 0 is a claim, not evidence.** `docs/TEARDOWN.md` section 6 is an eleven-row
-sweep against AWS rather than against Terraform, and four of its rows exist because no tag query
-is known to cover them. Cache policies, response headers policies and origin access controls expose no tags
+sweep against AWS rather than against Terraform, and three of its rows exist because no tag query
+can cover them. Cache policies, response headers policies and origin access controls expose no tags
 at all — the CloudFront API has nowhere to put them — so a leak in any of the three is invisible
 to a tag query, and no amount of tagging harder fixes it. Two of them each burn one of two quotas
 of **20 per account**: the custom cache policies and the custom response headers policies. The
-origin access control and the CloudFront function are named with the bucket's random suffix, so a
-leak collides with nothing on the next apply and a name-stable check cannot see it either. The
-quota failure surfaces later, at *apply* time, on an unrelated environment, naming nothing about
-the leak that caused it.
+origin access control is named with the bucket's random suffix on top of that, so a leak collides
+with nothing on the next apply and a name-stable check cannot see it either. The quota failure
+surfaces later, at *apply* time, on an unrelated environment, naming nothing about the leak that
+caused it.
 
 The CloudFront function is not a fourth untaggable type, and counting it as one is the easy
 mistake here: `aws_cloudfront_function` is taggable and carries this repository's `default_tags`
-already — `bootstrap/oidc.tf`'s `TagSiteCdnResources` grant exists partly because of it. Nor does
-that make it covered. Whether the resource groups tagging API returns one — the query the
-teardown assertion actually makes — has not been measured since the function was added, so its
-coverage is unproven in either direction. The function's row in section 6 therefore stands on its
-name, not on a tag barrier, and `docs/TEARDOWN.md` section 6.1 says so.
+already — `bootstrap/oidc.tf`'s `TagSiteCdnResources` grant exists partly because of it. That it
+is also *covered* is measured rather than assumed as of **2026-09-08**: with a `stage`
+environment standing, the exact query the teardown assertion makes — `resourcegroupstaggingapi
+get-resources` filtered on `Project` and `Env` — returned the function's ARN in us-east-1, beside
+the distribution, the access log group and the three delivery resources, and
+`cloudfront list-tags-for-resource` returned all five of the module's `default_tags` on it
+independently. **One run, one account, one day**, which settles the open question and is not a
+standing guarantee. The function's row in section 6 is therefore redundancy — it still earns its
+place on the grounds `docs/TEARDOWN.md` section 6.1 gives it, which do not depend on tags at all —
+rather than the only thing that would find a leaked one.
 
 To return the account to empty, tear down the bootstrap too — `docs/TEARDOWN.md` section 8. Three
 phases, and the order does not survive being rearranged: confirm nothing still carries the
@@ -361,22 +366,25 @@ make help          # every target, with what it does
 make fmt-check validate lint scan docs-check test audit
 ```
 
-That line covers six of `validate.yml`'s nine jobs — `terraform`, `tflint`, `trivy`,
+That line covers six of `validate.yml`'s ten jobs — `terraform`, `tflint`, `trivy`,
 `terraform-docs`, `terraform-test` and `zizmor` — invoked identically, so for those a local run
 and a green check really are the same command, and each Makefile target pins the tool version it
 needs and refuses to run on a different one rather than producing a diff nobody asked for.
 
-**Two required checks have no Makefile target, and cannot honestly be given one.** `actionlint`
-runs a pinned Docker image rather than a binary on `$PATH`, and `pr-title` greps a title that
-exists only in the pull request event payload, which no local command can read. So editing a
-workflow, running the line above and pushing can still produce a red required check: that is the
-one place the "same command" property does not reach, and it is worth knowing before it happens
-rather than after.
+**Two of `validate.yml`'s required checks have no Makefile target, and cannot honestly be given
+one.** `actionlint` runs a pinned Docker image rather than a binary on `$PATH`, and `pr-title`
+greps a title that exists only in the pull request event payload, which no local command can
+read. So editing a workflow, running the line above and pushing can still produce a red required
+check: that is the one place the "same command" property does not reach, and it is worth knowing
+before it happens rather than after.
 
 No job in `validate.yml` needs an AWS account, a role or a state bucket, which is what lets eight
-of its nine be required status checks. The ninth, `audit-online`, needs a GitHub token and reports
-on an advisory database rather than on this tree, so it can go red on a Tuesday without this
-repository having changed — which is why it runs and is deliberately not required.
+of its ten be required status checks — eight of the nine contexts in the ruleset `docs/BOOTSTRAP.md`
+carries, the ninth being `plan-gate`, which belongs to `plan.yml`. Two of the ten are not required.
+`audit-online` needs a GitHub token and reports on an advisory database rather than on this tree, so
+it can go red on a Tuesday without this repository having changed — which is why it runs and is
+deliberately not required. The other is `cross-root-consistency`, which compares the two strings the
+bootstrap root and the environment roots each declare separately; the ruleset does not list it.
 
 `make docs` regenerates the inputs and outputs tables inside `modules/static-site/README.md`,
 between its `BEGIN_TF_DOCS`/`END_TF_DOCS` markers. **This file is not generated and carries no

@@ -426,9 +426,10 @@ row carries no measurement from that day and says so: the viewer-request functio
 it, so its check is written from the same reasoning as the others. It has run since —
 `make verify-teardown` in the 2026-09-08 walk section 8 records returned every row clean,
 including that one, in 11s — which establishes that the check executes and finds nothing on an
-account with nothing to find. It does not answer 6.1's question, which is whether a *leaked*
-function would be visible to the tag inventory at all, and no clean sweep ever can. The column
-below is still 2026-08-27's, and a blank in a column of results is worth more than a number
+account with nothing to find. It does not answer the question 6.1 asks — whether the tag
+inventory returns a CloudFront function at all — and no clean sweep ever could; that one was
+settled the same day by a query run against a *standing* environment, and 6.1 carries it. The
+column below is still 2026-08-27's, and a blank in a column of results is worth more than a number
 copied from the row above it.
 
 | # | Check | Why it is on the list | Found |
@@ -437,7 +438,7 @@ copied from the row above it.
 | 2 | Custom **cache policies** | Quota **20 per account**, account-wide; the module creates 2 per environment | **0** |
 | 3 | Custom **response headers policies** | Quota **20 per account**, account-wide; 2 per environment; invisible to any tag query | **0** |
 | 4 | **Origin access controls** | Quota 100 per account; the name carries the bucket's random suffix, so a leak is invisible to a name-stable check *and* to tags | **none** |
-| 5 | **CloudFront Functions** | Quota 100 per account; named with the bucket's random suffix, so a leak collides with nothing on the next apply. **Taggable** — the function carries the caller's `default_tags`, so whether row 10 would find a leaked one is an open question rather than a settled no; see 6.1 | **not measured — this resource postdates the walk-through** |
+| 5 | **CloudFront Functions** | Quota 100 per account; named with the bucket's random suffix, so a leak collides with nothing on the next apply — which is what this row stands on. **Taggable, and row 10 does return it**: measured 2026-09-08, see 6.1, so this row is redundancy rather than the only detector | **not measured — this resource postdates the walk-through** |
 | 6 | Log groups under `/aws/vendedlogs/cloudfront/<name_prefix>-site-*`, **in us-east-1** | Accrues cost after the environment is gone; retention bounds it, it does not remove it | **none** |
 | 7 | Delivery **sources**, **destinations** and **deliveries**, us-east-1 | Four resources that are permanently in us-east-1 whatever region the environment uses | **`[]` / `[]` / `[]`** |
 | 8 | ACM certificates in us-east-1 left `PENDING_VALIDATION`, and the validation record in your hosted zone | Section 7 — reachable only on the custom-domain path, which nothing here has applied | **none from this repository** |
@@ -499,12 +500,39 @@ provider's `aws_cloudfront_function` carries the generic tagging interceptor —
 module sets no `tags` argument on it, but that does not make it untagged; it makes it carry the
 caller's `default_tags`, so `Project` and `Env` are on it.
 
-What does **not** follow is the opposite claim. Whether the resource groups tagging API returns a
-CloudFront function has not been measured here — the two-region inventory in 6.2 was taken on
-2026-08-27, before this resource existed, and nothing has re-run it since. So the honest position
-is that the tag barrier is **unproven, not proven**: row 10 may or may not see a leaked function,
-and until somebody re-runs the inventory with one standing, this command is what finds it either
-way.
+Being tagged and being *returned* are still two claims, and the second one was open until it was
+measured: the two-region inventory in 6.2 was taken on 2026-08-27, before this resource existed.
+It was measured directly on **2026-09-08**, and the answer is that the API returns it. With a
+`stage` environment standing, the exact query row 10 makes, run in us-east-1 —
+
+```bash
+aws resourcegroupstaggingapi get-resources --region us-east-1 \
+  --tag-filters Key=Project,Values=<project> Key=Env,Values=stage
+```
+
+— returned `function/<name_prefix>-site-stage-<8 hex>` beside the distribution, the access log
+group and the three delivery resources. The same query against the environment's own region
+returned nothing CloudFront-typed at all, the distribution included — the fact 6.2's first bullet
+now rests on. Two independent confirmations of the same result:
+`aws cloudfront list-tags-for-resource` on that ARN returned all five of the module's
+`default_tags`, and `get-resources --resource-type-filters cloudfront:function` returned the
+function as well.
+
+**One run, one account, one day**, and taken against a standing function rather than a leaked
+one — the same resource carrying the same tags, which is why it answers row 10's question, and a
+distinction worth keeping in view rather than rounding off. So the tag barrier is **proven for
+this resource**, on that evidence and no more: row 10 covers a leaked function, and the sentence
+that said nobody could tell either way is retired rather than softened.
+
+None of that retires this command, and none of it is a second reason for it either. The reason
+given for the third command above never rested on a tag barrier — it rested on the random suffix,
+which is untouched — so it survives the measurement exactly as written. What the measurement
+changes is the *standing* of the command, and only where this repository described it as the one
+thing that could find a leaked function: it is redundancy now. Real redundancy rather than the
+same check twice, because the two are keyed on different values. The tag inventory is keyed on
+the `project` in `envs/*/terraform.tfvars`, and a wrong one there makes it query a tag nothing
+carries and report success over a leak — a failure those files write down themselves; this sweep
+is keyed on `name_prefix`, which the CI apply role's own scoping already enforces.
 
 No `--stage` filter: a function this module leaves behind exists in both
 stages, and a filter is one more way for a sweep to look past the thing it is for.
@@ -513,10 +541,13 @@ stages, and a filter is one more way for a sweep to look past the thing it is fo
 
 Tags are the obvious way to assert a clean teardown, and on this module they cover **6 of 17
 resources**. Measured, per environment, on 2026-08-27 — before the viewer-request function was
-added, which makes the environment 18 resources without moving either number below. Which half
-the eighteenth belongs to is not known: the function is taggable and carries `default_tags`, but
-whether the tagging API returns it has not been measured, so it is neither counted as covered nor
-counted as invisible here.
+added, which makes the environment 18 resources. The eighteenth belongs to the covered half: the
+function is taggable, carries `default_tags`, and on 2026-09-08 the tagging API was measured
+returning it, in us-east-1, with an environment standing (6.1). So the table below is still
+2026-08-27's and its us-east-1 row would read **6** rather than 5 if it were re-run against a
+function — the one number the function's addition does move. Read across the two dates the coverage
+is 7 of 18, and it is worth reading as two dated measurements rather than as one table, because
+the second was a single run.
 
 | Query | Resources returned |
 |---|---|
@@ -529,7 +560,14 @@ confirms:
 - **A single-region tag query reports success over surviving resources.** Querying only the
   environment's region returns one resource; five live us-east-1 resources are outside it,
   because CloudFront's logging API must be called in us-east-1 whatever region the environment
-  uses. Any teardown assertion has to query both regions.
+  uses. The log-delivery set is not the whole of what such a query would miss, and reading this
+  bullet as a logging problem understates it. CloudFront-typed resources surface to the tagging
+  API in **us-east-1 only**: on 2026-09-08 the same two-region query that found the function in
+  us-east-1 (6.1) returned nothing CloudFront-typed from the environment's own region — the
+  distribution included, which is applied from that region and still does not answer there. So
+  us-east-1 is not merely where the log group and the three delivery resources live; it is the
+  only region in which any taggable CloudFront resource is visible at all. Any teardown assertion
+  has to query both regions. That second measurement is one run, one account, one day.
 - **The four quota-bearing policies and the origin access control are invisible in both regions.**
   `aws_cloudfront_cache_policy`, `aws_cloudfront_response_headers_policy` and
   `aws_cloudfront_origin_access_control` expose no `tags` argument and no `tags_all` attribute —
@@ -538,11 +576,12 @@ confirms:
 
 - **The viewer-request function does not belong on that list, whatever "You can't add tags to
   edge functions" suggests.** `aws_cloudfront_function` *is* taggable — see 6.1 — and the
-  module's caller-supplied `default_tags` are on it. Note what that does and does not buy: the
-  measurement above was taken before this resource existed, so it says nothing about whether the
-  tagging API returns a function, and no one has re-run it. The function's position here is
-  **unmeasured**, not "visible" and not "invisible". Section 6.1's prefix sweep is what covers it
-  in the meantime, and it covers it on grounds that do not depend on the answer.
+  module's caller-supplied `default_tags` are on it. It is also **visible**, which is the separate
+  claim and the one that took a measurement: the table above was taken before this resource
+  existed, so the query was re-run on 2026-09-08 with an environment standing (6.1) and the
+  tagging API returned the function's ARN in us-east-1. It belongs in the us-east-1 row of that
+  table, beside the distribution, on one run's evidence. Section 6.1's prefix sweep still covers
+  it and still earns its place, on grounds that never depended on the answer.
 
 ### 6.3 The account may not be only yours
 
@@ -831,8 +870,10 @@ a wrong one.
 
 **An exit code is not evidence.** Run section 6, both regions, and run section 6.1 in
 particular — the two quota-bearing policy types are invisible to every tag-based assertion in
-this repository and are the tightest limit in it, and the origin access control and the
-viewer-request function are invisible in the same way on looser quotas.
+this repository and are the tightest limit in it, and the origin access control is invisible in
+the same way on a looser quota. The viewer-request function is not: the tag inventory was
+measured returning it on 2026-09-08 (6.1), so 6.1's sweep of it is a second detector rather than
+the only one.
 
 **An interrupted destroy is recoverable and costs nothing.** `force-unlock` with the id from the
 error, then re-run `destroy` with no special flags. Do not read the state file to work out what

@@ -1044,9 +1044,11 @@ destroy-prod: check-terraform ## Destroy the prod environment. Prompts before re
 # docs/TEARDOWN.md section 6 as a target, because a checklist a human pastes is
 # a checklist that drifts from the code it describes. It had already drifted
 # when this was written: row 5, the CloudFront Function, reads "not measured —
-# this resource postdates the walk-through", and the three commands in section
-# 6.1 appear in no Makefile target and no workflow. Prose drifts in silence; a
-# target drifts in a diff, where somebody has to approve it.
+# this resource postdates the walk-through" in its Found column — that is the
+# sweep result, not the tag question, which 6.1 settled on 2026-09-08 — and the
+# three commands in section 6.1 appear in no Makefile target and no workflow.
+# Prose drifts in silence; a target drifts in a diff, where somebody has to
+# approve it.
 #
 # What it is for. A destroy exiting 0 is a claim about a state file, and the
 # resources most worth worrying about are the ones that leave state without
@@ -1056,18 +1058,25 @@ destroy-prod: check-terraform ## Destroy the prod environment. Prompts before re
 # API has nowhere to put them. So the
 # tag-based assertion e2e.yml makes at the end of a lifecycle run is
 # structurally blind to a leak in any of them, and section 6.2 measures how
-# blind: tags cover 6 of the module's 18 resources. What finds the rest is a
-# sweep by name, which is this.
+# blind: tags cover 7 of the module's 18 resources — 6 of 17 measured on
+# 2026-08-27, plus the viewer-request function, added after that table and
+# measured separately on 2026-09-08. What finds the rest is a sweep by name,
+# which is this.
 #
 # `aws_cloudfront_function` is not a fourth on that list, whatever "You can't
 # add tags to edge functions" suggests: it is taggable — the provider exposes
 # tagging on it and this module's `default_tags` are already on it — so the
-# reason it is swept here is not a tag barrier. Do not read that the other way
-# either and conclude the tag assertion covers it. Whether the resource groups
-# tagging API returns a CloudFront function has never been measured in this
-# repository, so the sweep covers it on the ground that holds either way: its
-# name carries the site bucket's `random_id` suffix, so a leaked one collides
-# with nothing on the next apply and has no loud failure waiting for it.
+# reason it is swept here is not a tag barrier. Being tagged is not the same
+# claim as being returned, and that second one was measured on 2026-09-08 rather
+# than assumed: with a `stage` environment standing, the tag inventory returned
+# the function's ARN in us-east-1, so the tag assertion does cover a leaked one.
+# One run, one account, one day — docs/TEARDOWN.md 6.1 carries it. So this
+# target's function row is redundancy rather than the only detector, and real
+# redundancy rather than the same check twice, because the two are keyed on
+# different values: the tag inventory on `project`, this on `name_prefix`. The
+# row's own ground is untouched by that measurement — the function's name
+# carries the site bucket's `random_id` suffix, so a leaked one collides with
+# nothing on the next apply and has no loud failure waiting for it.
 #
 # ONE ACCOUNT-WIDE TARGET, NOT `verify-teardown-stage` AND `-prod`. That breaks
 # the per-environment convention every other AWS-facing target in this file
@@ -1292,9 +1301,13 @@ destroy-prod: check-terraform ## Destroy the prod environment. Prompts before re
 # For the two policy types the 20-per-account quota puts 100 out of reach. For
 # functions it does not: that quota is 100, so an account at its function limit
 # is exactly the account whose leaked function falls off the end of the page —
-# and the CloudFront Function is the resource whose other detectors are weakest:
-# it collides with nothing on the next apply, and whether the tag inventory sees
-# it is unmeasured, so this sweep is what it has.
+# and the CloudFront Function is the one of the three with no loud failure
+# waiting for it, because it collides with nothing on the next apply. Its other
+# automatic detector is the tag inventory, which was measured returning a
+# standing function on 2026-09-08, and that one is keyed on the `project` in
+# `envs/*/terraform.tfvars` — a wrong value there reports success over a live
+# leak. Truncating this page silently would drop the row keyed on `name_prefix`
+# instead, which is the one that survives that mistake.
 #
 # So those three queries ask for the marker as well as the names, in the same
 # call rather than a second one, by prepending a `!TRUNCATED!` element when
