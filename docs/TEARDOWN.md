@@ -389,6 +389,77 @@ aws iam put-role-permissions-boundary \
 Then re-run the destroy. If the boundary policy's ARN has genuinely changed, the bootstrap has
 to be re-applied first so the condition and the attached boundary name the same ARN again.
 
+### 5.5 A destroy that fails on `cloudfront:GetDistribution` after the distribution is gone
+
+Seen for real on 2026-09-10, on a `make destroy-stage` of a fully applied environment. It sits
+here for the same reason 5.4 does — something outside Terraform has to change before the destroy
+can finish — with one difference that makes it easy to misread: **the resource this one fails
+over is already deleted in AWS.**
+
+**What it looks like.** The destroy runs normally. It disables the distribution, waits out the
+propagation, deletes it — and then fails with an `AccessDenied` on `cloudfront:GetDistribution`
+against `arn:aws:cloudfront::<account-id>:distribution/<distribution-id>`, ending in the words
+**`because no identity-based policy allows`**. Read that ending rather than the action name. It
+is an *implicit* deny — no statement matched the request — and it is a different diagnosis from
+the explicit `with an explicit deny in an identity-based policy` that the `DenyForeign*Retag`
+statements in 6.3 produce. An implicit deny means a grant is missing; an explicit one means a
+`Deny` fired.
+
+**Why it happens.** The AWS provider tears a distribution down in three steps: `UpdateDistribution`
+to disable it, `DeleteDistribution` to remove it, and then a poll of `GetDistribution` until that
+answers `NoSuchDistribution`. Until 2026-09-10 all three actions sat in a single
+`ManageSiteDistributions` statement in `bootstrap/oidc.tf`, gated on `aws:ResourceTag/Name`
+matching this environment's pattern. That gate is satisfiable for the first two calls, which run
+against a distribution that still exists and still carries its tags. It is unsatisfiable for the
+third: a deleted distribution has no tags, an absent condition key cannot match a `StringLike`,
+and no other statement allowed the call — so the poll is refused and the run fails at the waiter.
+
+**The distribution really is destroyed, and nothing is orphaned by it.** The delete succeeded
+and the refusal came after it, so the distribution is gone from AWS while state still lists it.
+What survives is section 4's wave 3 — the origin access control, both cache policies, both
+response headers policies and the bucket — plus anything else the distribution was still holding
+when the run stopped. Wave 1 is already gone. That is an unfinished destroy rather than a leak,
+and the commands below finish it. Run the section 6 sweep afterwards anyway: the run exited
+non-zero, which is exactly when this document says not to take a claim on faith.
+
+**The recovery is three commands.**
+
+```bash
+terraform -chdir=envs/<env> init -input=false -backend-config=backend.hcl
+terraform -chdir=envs/<env> state rm module.site.aws_cloudfront_distribution.site
+terraform -chdir=envs/<env> destroy
+```
+
+The `init` is not a formality and is the step most likely to be skipped: `state rm` reaches the
+state through the backend, so an uninitialised root fails on the backend before it ever looks at
+the address — the same reason 5.3 opens with it. Confirm the address against
+`terraform -chdir=envs/<env> state list` before removing anything: a `state rm` against the wrong
+address orphans a live resource, which is the failure this whole document exists to prevent. The
+`destroy` that follows removes whatever the interrupted run had not reached.
+
+**In CI it needs the same hand.** `e2e.yml`'s destroy fails at the same call, its `cleanup` job
+re-runs the same `terraform destroy` under the same role and is refused at the same call, and the
+run ends with an `orphaned-resources` issue. That issue is *not* a false report — wave 3 really is
+still standing — but no automation here can clear it, because the fix is the `state rm` above and
+nothing in the workflow runs one. Do it by hand against `stage`, following section 2.
+
+**It should not recur — but the repository change alone does not fix a live role.**
+`bootstrap/oidc.tf` now carries `GetDistribution` and `GetDistributionConfig` in a separate,
+unconditioned `ReadSiteDistributions` statement, so the post-delete poll is authorised against a
+resource with no tags left to read. **That is a change to source. The inline policy on a live
+apply role is only rewritten by `terraform apply` in `bootstrap/`**, so until that has been run
+against this account, every apply role still carries the old single statement and every destroy
+still ends this way. If you hit this on a checkout that already contains the fix, check what the
+account actually holds before concluding the fix does not work:
+
+```bash
+aws iam get-role-policy \
+  --role-name <name_prefix>-ci-apply-<env> --policy-name infrastructure \
+  --query 'PolicyDocument.Statement[?Sid==`ReadSiteDistributions`]'
+```
+
+An empty list means the bootstrap has not been re-applied, and re-applying it is the fix.
+
 ## 6. The post-destroy checklist
 
 A destroy exiting 0 is a claim, not evidence. Terraform reports on what was in its state file,
@@ -607,11 +678,16 @@ confirms:
 was measured in it returned one distribution belonging to an unrelated project. **Match against
 the module's naming before deleting anything by hand.** The same caution applies in the other
 direction. That warning used to say the CI apply role could update and delete distributions this
-repository did not create; it no longer can. `ManageSiteDistributions` conditions all four
-distribution-typed actions on `aws:ResourceTag/Name` matching `<name_prefix>-site-<env>-*`, so a
-foreign distribution is out of reach of the credential, and so is the other environment's. Treat
-a hand-run destroy with a `-target` as the highest-risk command in this document anyway — the
-condition bounds which resources a mistake can reach, not whether you make one.
+repository did not create; it no longer can. `ManageSiteDistributions` conditions
+`DeleteDistribution` and `UpdateDistribution` on `aws:ResourceTag/Name` matching
+`<name_prefix>-site-<env>-*`, so a foreign distribution cannot be changed or removed by the
+credential, and neither can the other environment's. The two reads — `GetDistribution` and
+`GetDistributionConfig` — are deliberately *not* conditioned, and 5.5 is the teardown that says
+why: they are polled after the delete, when there are no tags left to match. So the role can
+still read any distribution in the account, and that is the narrower claim this warning now
+makes: it cannot delete or reconfigure a foreign distribution, and it can still look at one.
+Treat a hand-run destroy with a `-target` as the highest-risk command in this document anyway —
+the condition bounds which resources a mistake can reach, not whether you make one.
 
 That exposure is deferred, not permanent, and the argument that makes it look permanent is the
 one to refuse: that the apply role's CloudFront grants cannot be scoped by resource because
@@ -627,27 +703,33 @@ whole of it. The conclusion does not follow, because a
 four of which take the `distribution` resource type and support `aws:ResourceTag/${TagKey}`.
 Twenty-four of the thirty-four CloudFront actions on the CDN surface take a resource ARN; those
 ten do not. The thirty-four is the CDN surface — `ManageCloudFront` (21),
-`ManageSiteDistributions` (4), `ManageSiteFunctions` (5), `TagSiteCdnResources` (2),
-`CreateSiteDistribution` (1) and `UntagSiteCdnResources` (1) — rather than every CloudFront
-action the policy grants: a thirty-fifth, `cloudfront:AllowVendedLogDeliveryForResource`, sits
-further down in `ServiceLevelAccessForLogDelivery`. Generalising from the ten to the twenty-four
+`ManageSiteDistributions` (2), `ReadSiteDistributions` (2), `ManageSiteFunctions` (5),
+`TagSiteCdnResources` (2), `CreateSiteDistribution` (1) and `UntagSiteCdnResources` (1) — rather
+than every CloudFront action the policy grants: a thirty-fifth,
+`cloudfront:AllowVendedLogDeliveryForResource`, sits further down in
+`ServiceLevelAccessForLogDelivery`. Generalising from the ten to the twenty-four
 is the error, and the `ManageCloudFront` comment in `bootstrap/oidc.tf` says so at the grant
 itself, with the same count and the same scoping of it. Count from that statement rather than
 from this sentence if the two ever disagree: the action lists move, and the numbers move with
 them.
 
 Part of the surface is already scoped rather than merely scopable. `ManageSiteFunctions` names
-`function/<name_prefix>-site-*` across all five function actions, and `TagSiteCdnResources` names
-the distribution and function ARNs, so the function half of this warning no longer applies: the
-role cannot delete, update or publish a CloudFront function outside this repository's namespace,
-in a shared account or any other. `ManageCertificates` has always been scoped to `certificate/*`.
-The distribution half is now scoped too. `ManageSiteDistributions` conditions
-`DeleteDistribution`, `UpdateDistribution`, `GetDistribution` and `GetDistributionConfig` on
+`function/<name_prefix>-site-<env>-*` across all five function actions, and
+`TagSiteCdnResources` names the distribution and function ARNs, so the function half of this
+warning no longer applies: the role cannot delete, update or publish a CloudFront function
+outside this repository's namespace, in a shared account or any other. `ManageCertificates` has
+always been scoped to `certificate/*`. The distribution half is now scoped too, on the calls that
+change something.
+`ManageSiteDistributions` conditions `DeleteDistribution` and `UpdateDistribution` on
 `aws:ResourceTag/Name`, and `CreateSiteDistribution` conditions the create on
 `aws:RequestTag/Name`, so every distribution the role can mint is one it can also remove and no
-other. What stays account-wide permanently is the ten actions that take no resource type, plus
-the twelve cache-policy, response-headers-policy and origin-access-control actions whose resource
-types carry no tag to condition on.
+other. `GetDistribution` and `GetDistributionConfig` sit unconditioned in
+`ReadSiteDistributions`, for the reason 5.5 gives, so the read half of that surface stays
+account-wide by choice: the role can look at any distribution in the account and can delete or
+reconfigure none but its own. The tag reach is a separate matter and the paragraph below prices
+it. What stays account-wide with no choice in it is the ten actions that take no
+resource type, plus the twelve cache-policy, response-headers-policy and origin-access-control
+actions whose resource types carry no tag to condition on.
 
 **The condition is a guard against accidents, not against an attacker holding the credential**,
 and the reason is worth keeping in front of anyone reading this section.

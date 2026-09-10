@@ -20,9 +20,13 @@ workflow mechanics and comment accuracy are not, and are left to git history.
   `<name_prefix>-site-<env>-*`. CloudFront distributions and ACM certificates carry AWS-minted
   identifiers and cannot be named in an ARN pattern, so they are bounded by tag instead:
   `cloudfront:CreateDistribution` and `acm:RequestCertificate` require `aws:RequestTag/Name` to
-  match that pattern, and the distribution and certificate actions require `aws:ResourceTag/Name`
+  match that pattern, and the destructive distribution actions — `cloudfront:DeleteDistribution`
+  and `cloudfront:UpdateDistribution` — and the certificate actions require `aws:ResourceTag/Name`
   to match it. Untagging is refused for the `Name` key on both, so the tag cannot be stripped after
-  the fact to escape the condition.
+  the fact to escape the condition. The two distribution reads, `cloudfront:GetDistribution` and
+  `cloudfront:GetDistributionConfig`, are deliberately *not* conditioned: the AWS provider polls
+  `GetDistribution` after the delete, when the distribution has no tags left for the condition to
+  read, so a gate there fails every teardown against a distribution that is already gone.
 
   **Upgrading:** hand-apply `bootstrap/` before applying an environment. The change is a
   `PutRolePolicy` on existing roles — no role is replaced and no credential changes. Then, if you
