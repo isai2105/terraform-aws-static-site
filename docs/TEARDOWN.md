@@ -657,15 +657,16 @@ together against a resource that does not exist yet. A foreign distribution coul
 retagged into scope and then deleted, in two calls. `DenyForeignDistributionRetag` is a separate
 `Deny` on the same action, guarded by a `Null` test on `aws:ResourceTag/Name` so that it is inert
 wherever the key is absent — which is precisely the create — and fires only against a
-distribution that already exists and carries a `Name` outside this environment's pattern. It is
-*believed* to close that path and has not been measured: nothing AWS publishes says the key is
-populated in the authorization context for `TagResource`, and if it is not, the deny never fires
-and says nothing. A distribution carrying no `Name` tag at all is outside it either way. So the
-sentence this paragraph opens with still stands as written. What the condition closes is the
-accident this section is actually about — a bad merge, a `-target` typo, a destroy pointed at the
-wrong root. `UntagSiteCdnResources` closes the matching self-inflicted case in the other
-direction: the role cannot remove the `Name` tag it now depends on, which would otherwise strand a
-standing distribution in one call.
+distribution that already exists and carries a `Name` outside this environment's pattern. Nothing
+AWS publishes says the key is populated in the authorization context for `TagResource`, so it was
+measured on 2026-09-10: tagging this environment's own distribution succeeded, and the same call
+against that distribution once its `Name` was prod-shaped was refused "with an explicit deny in an
+identity-based policy". It closes that path. A distribution carrying no `Name` tag at all is
+outside it either way. So the sentence this paragraph opens with still stands as written. What the
+condition closes is the accident this section is actually about — a bad merge, a `-target` typo, a
+destroy pointed at the wrong root. `UntagSiteCdnResources` closes the matching self-inflicted case
+in the other direction: the role cannot remove the `Name` tag it now depends on, which would
+otherwise strand a standing distribution in one call.
 
 ### 6.4 One thing this checklist cannot tell you
 

@@ -1740,8 +1740,8 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   }
 
   # The `Deny` written to stop the distribution tag condition from being walked
-  # around. Whether it does is not known, and the section headed "Believed to
-  # close" below is the load-bearing part of this comment.
+  # around. It does: the section headed "Measured" below is the load-bearing
+  # part of this comment.
   #
   # `ManageSiteDistributions` holds `DeleteDistribution` and `UpdateDistribution`
   # to distributions whose `Name` matches this environment's pattern, while
@@ -1777,8 +1777,7 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # at the end.
   #
   # ---------------------------------------------------------------------------
-  # Believed to close the retag-then-delete path. Unmeasured, and it fails
-  # silently if the belief is wrong.
+  # Measured on 2026-09-10: it closes the retag-then-delete path.
   # ---------------------------------------------------------------------------
   #
   # The Service Authorization Reference, read on 2026-09-09, says
@@ -1787,26 +1786,21 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # this is not the ACM-style mistake of naming a key an action does not carry.
   # What is documented nowhere is whether IAM actually populates that key in the
   # authorization context for a `TagResource` call against a standing
-  # distribution. If it does not, the `Null` test is false on every request, this
-  # statement never fires, and nothing changes — with no error, no failed run and
-  # nothing in a plan to notice. Every claim made for it, here and in README.md,
-  # is written as "believed to close" for that reason, and none of them should be
-  # rewritten as settled fact until the probe below has been run.
-  #
-  # What would settle it: a stage cycle run under a session policy carrying this
-  # `Deny`, showing the create and destroy paths untouched, plus one manual
-  # `cloudfront:TagResource` against a distribution tagged outside stage's
-  # pattern, expected to be denied. The first half is the same shape of probe
-  # that measured the post-create tag-read window on 2026-09-05; the second half
-  # needs a foreign-tagged distribution to exist, which is why it has not been
-  # run.
+  # distribution. It does. Measured against the live account on 2026-09-10,
+  # under a verbatim copy of stage's rendered policies, in both halves: adding a
+  # tag to the environment's own distribution succeeded, and once that
+  # distribution's `Name` had been rewritten to a prod-shaped value the same
+  # `cloudfront:TagResource` was refused "with an explicit deny in an
+  # identity-based policy" — the explicit-deny form, not an implicit deny from a
+  # missing allow. So the key is populated for this action, this statement is
+  # not inert, and it does not catch the environment's own distribution.
   #
   # Named residual, which the `Null` test creates rather than merely leaves
   # behind: a distribution carrying no `Name` tag at all is outside this `Deny`
   # and can still be retagged into scope and then deleted. Every distribution
   # this repository creates carries `Name` — `CreateSiteDistribution` refuses a
   # create without one via `aws:RequestTag/Name`, and `UntagSiteCdnResources`
-  # refuses to remove it — so the stage-reaches-prod case is believed closed. An
+  # refuses to remove it — so the stage-reaches-prod case is closed. An
   # untagged distribution belonging to something else in the account is not, and
   # closing that would mean denying `TagResource` wherever the key is absent,
   # which is the create.
@@ -1984,8 +1978,11 @@ data "aws_iam_policy_document" "apply_infrastructure" {
   # the condition is well formed — but whether IAM populates the key for this
   # action is undocumented, and the module's ACM path has never been applied in
   # CI or by hand, so nothing this statement guards has ever been exercised. The
-  # residual is the CloudFront one unchanged: a certificate carrying no `Name`
-  # tag is outside this `Deny`. Every certificate this repository requests carries one, because
+  # 2026-09-10 CloudFront measurement does not carry over: whether a condition
+  # key is populated is decided per service, so that result is suggestive here
+  # and nothing more. The residual is the CloudFront one unchanged: a
+  # certificate carrying no `Name` tag is outside this `Deny`. Every certificate
+  # this repository requests carries one, because
   # `RequestCertificates` conditions the request on `aws:RequestTag/Name` and
   # `UntagSiteCertificates` refuses to remove it.
   statement {
@@ -2916,14 +2913,14 @@ data "aws_iam_policy_document" "apply_identity" {
 # environment's own: stage's distribution would fail prod's copy, prod's would
 # fail stage's. The result would be a role that creates a distribution
 # successfully — the `Null` guard keeps the create clear — and would then be
-# denied every subsequent `TagResource` against it. Written in the conditional
-# because it rests on the same unmeasured belief the statements themselves do:
-# if IAM does not populate the key, neither the protection nor this hazard
-# exists. That is an argument for not merging them rather than against, since
-# the document does not say which way it will go. Dropping them is the safe
-# minimum. The correct union is one statement per service whose `StringNotLike`
-# carries *both* patterns as values, which denies only a `Name` matching neither, because a negated string
-# operator over several values requires the key to match none of them.
+# denied every subsequent `TagResource` against it. That is measured for the
+# CloudFront half (2026-09-10) and still conditional for the ACM one, which
+# rests on the same unmeasured belief the statement itself does: if IAM does not
+# populate the key there, neither the protection nor that hazard exists. Either
+# way, dropping them is the safe minimum. The correct union is one statement per
+# service whose `StringNotLike` carries *both* patterns as values, which denies
+# only a `Name` matching neither, because a negated string operator over several
+# values requires the key to match none of them.
 #
 # Edit any of these documents and re-sync every mirror of it in the same change,
 # not a follow-up one. A mirror that has fallen behind does not
