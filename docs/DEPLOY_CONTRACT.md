@@ -691,23 +691,43 @@ reading anything else.
 
 ## 9. Evidence
 
-> **Not yet verified.** The line this section will carry, once it can:
+> **Verified on 2026-09-11 by assuming `react-cloudfront-app-deploy-stage` from
+> `react-cloudfront-app` run #34648306286 and reading all three parameters.**
 >
-> *Verified on YYYY-MM-DD by assuming `react-cloudfront-app-deploy-stage` from
-> `react-cloudfront-app` run #N and reading all three parameters.*
+> <https://github.com/isai2105/react-cloudfront-app/actions/runs/34648306286>
 
-That is a placeholder on purpose, and it stays one until the app repository has deployed.
+That run — `workflow_dispatch` on `main`, head `b3667601b50ccee265ee8c792107c32a73ff9973`,
+promoting the `dist` artefact of its own CI run 34648171205 — assumed the role through
+`AssumeRoleWithWebIdentity` with a token GitHub minted for the subject in section 1.3, and read:
 
-The evidence it will carry can only be produced by that repository's deploy job, and that job is
-written against *this document*. Filling the line in now would mean either fabricating a run link
-or blocking this document on a repository that cannot be built until the document exists. The
-chain runs app 0.1 → infra 28 → infra 29 → app 20–21 → infra 31, and it closes in this
-repository's step 6.2, which replaces the line above with the run link, the date, and the three
-parameter values that run actually read.
+| Parameter | Value that run read |
+|---|---|
+| `/static-site/stage/bucket_name` | `isai2105-site-stage-9a420966` |
+| `/static-site/stage/cloudfront_distribution_id` | `E2Q8QP5IJGHE9F` |
+| `/static-site/stage/site_url` | `https://d3rzwysvn4d9u4.cloudfront.net` |
 
-Until then, treat everything above as reviewed and unexercised. The five permissions in
-particular have never been used by the identity that will use them, for the reason section 7.3
-gives.
+The values match what `terraform -chdir=envs/stage apply` had emitted as outputs a few hours
+earlier on the same day, read back here with the operator's own credentials before the run was
+dispatched. They are recorded as the values of one applied environment rather than as constants:
+the bucket suffix and the hostname are minted afresh on every apply, so the next `stage` will
+publish three different values under the same three names, which is why section 2 forbids
+hardcoding any of them.
+
+The same run is the first exercise of the five permissions section 7.1 enumerates, and all five
+were used: `s3:ListBucket` and `s3:PutObject` by the sync in section 4.1, `cloudfront:CreateInvalidation`
+by the invalidation it created (`IB347130BE45NDEJNX43G7RQIA`), `cloudfront:GetInvalidation` by the
+wait on it, and `ssm:GetParameter` by the three reads above. The run's own verification then
+fetched the deployed `/build-info.json` from the published `site_url` and found the promoted
+commit's SHA in it. So the enforcement section 7.3 describes — the first deploy after a change is
+the test, and nothing cheaper was built — has now fired once, against the boundary and the
+inline policy as they stood on that date. It says nothing about any later change to either; the
+first `stage` deploy after such a change is the test again, for the reason 7.3 gives.
+
+This line was a placeholder from the commit that introduced this document until the run above,
+on purpose. The evidence can only be produced by the app repository's deploy job, and that job
+is written against *this document*, so filling it in earlier would have meant either fabricating
+a run link or blocking this document on a repository that could not be built until the document
+existed. The chain runs app 0.1 → infra 28 → infra 29 → app 20–21 → infra 31, and it closed here.
 
 ---
 
