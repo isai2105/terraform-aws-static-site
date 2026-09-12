@@ -436,7 +436,14 @@ real URIs the way it claims to, whether a missing asset really comes back as the
 origin's `403`, whether a response headers policy's headers survive that
 forwarded 403, DNS validation — none of these has a plan-time shadow. A plan can
 see that the function is attached and cannot run a line of it. The end-to-end
-workflow is what makes the real request.
+workflow is what makes the real request, and on the third it has answered: the
+`403` for `/assets/does-not-exist.js` has carried
+`cache-control: public, max-age=31536000, immutable` on every green run since
+the error mapping went, which the workflow prints and does not assert. It
+stays as observation. What a browser does with that header, and why the deploy
+ordering keeps a browser from ever asking for a hashed URL the bucket lacks, is
+`docs/DEPLOY_CONTRACT.md` section 4.1; cloudfront.tf says why the header is
+left on.
 
 ## What this module does not do yet
 

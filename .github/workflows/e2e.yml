@@ -245,15 +245,15 @@ env:
   # The module seeds `index.html` and nothing else, so without this every
   # request under `/assets/*` would be a request for a key that is not there.
   # The caching assertion below would then be reading headers off the origin's
-  # 403 rather than off an object — and whether the assets response headers
-  # policy reaches a forwarded 403 at all is an open question in the module
-  # README, so the assertion would rest on something this repository has not
-  # established. Uploading a byte of JavaScript costs one `aws s3 cp` with a
-  # credential already in hand, into a bucket that is destroyed minutes later.
-  # It is not a Terraform resource, so nothing plans it and nothing reads it
-  # back as drift; `force_destroy = true` on this environment removes it with
-  # the bucket, which is the same property the app repository's own deploys
-  # rely on.
+  # 403 rather than off an object — and that the assets response headers
+  # policy reaches a forwarded 403 is something the missing-asset probe below
+  # records and deliberately never asserts, so the assertion would rest on an
+  # observation rather than a contract. Uploading a byte of JavaScript costs
+  # one `aws s3 cp` with a credential already in hand, into a bucket that is
+  # destroyed minutes later. It is not a Terraform resource, so nothing plans
+  # it and nothing reads it back as drift; `force_destroy = true` on this
+  # environment removes it with the bucket, which is the same property the app
+  # repository's own deploys rely on.
   #
   # It is uploaded with no `Cache-Control` of its own, on purpose: that is what
   # the documented deploy sequence does, and the header this workflow then
@@ -931,12 +931,15 @@ jobs:
           cache_control="$(header cache-control)"
           echo "      status: ${status}, content-type: ${content_type:-<absent>}"
 
-          # Recorded, never asserted. Whether a response headers policy's
-          # headers survive a 403 forwarded from the origin is an open question
-          # in the module README, and this is the only request this repository
-          # makes that can show the answer. Printing it makes the answer
-          # readable in the log; asserting on it would be inventing a contract
-          # out of one observation.
+          # Recorded, never asserted. This is the only request this repository
+          # makes that can show whether a response headers policy's headers
+          # survive a 403 forwarded from the origin, and it has shown that they
+          # do: every green run since the error mapping went, from 33423275433
+          # on 2026-08-31, printed `public, max-age=31536000, immutable` here.
+          # What a browser does with that, and why the deploy ordering keeps
+          # the case unreachable, is docs/DEPLOY_CONTRACT.md section 4.1. Still
+          # printed and still not asserted: an assertion here would turn one
+          # repository's observation into a contract, in either direction.
           echo "      cache-control: ${cache_control:-<absent>}"
 
           case "$status" in

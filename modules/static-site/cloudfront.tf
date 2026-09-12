@@ -98,6 +98,17 @@ resource "aws_cloudfront_origin_access_control" "site" {
 # the 5xx range — are not what a missing key produces against this bucket, for
 # the reason the s3:GetObject grant in s3.tf gives.
 #
+# The browser is the other cache, and it is not so careful. The refusal leaves
+# the edge under the /assets/* behaviour, so the response headers policy in
+# policies.tf stamps it `Cache-Control: public, max-age=31536000, immutable` on
+# the way out (every green end-to-end run has printed exactly that on the 403),
+# and a Chromium browser holds a 403 carrying an explicit max-age for the full
+# period; Firefox revalidates every 403. The header stays as it is, and not
+# because a policy cannot be conditioned on status (it cannot): the case is
+# unreachable under the deploy ordering docs/DEPLOY_CONTRACT.md section 4.1
+# sets, which uploads assets first, index.html last, and deletes nothing, so no
+# document a browser can hold names a chunk the bucket lacks.
+#
 # ---------------------------------------------------------------------------
 # The rule, and what it gets wrong
 # ---------------------------------------------------------------------------
