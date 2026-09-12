@@ -55,7 +55,7 @@
 # also gets the bump reviewed against a real plan, which a Dependabot pull
 # request could not — it carries a read-only token and cannot assume an OIDC
 # role, and plan.yml selects every environment for any change under
-# `modules/`.
+# `modules/` other than the module's README.
 #
 # ---------------------------------------------------------------------------
 # The state of Dependabot's other two features on this repository

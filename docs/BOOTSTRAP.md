@@ -675,9 +675,10 @@ misbehaving rather than like the token it is.
 
 It bites harder on this particular pull request than the general rule suggests. The refresh
 touches `modules/static-site/.terraform.lock.hcl`, and `plan.yml`'s `detect` job treats any
-change under `modules/` as shared across environments — so it selects every environment and
-there is a real plan to run, against real state, with an OIDC role. `plan.yml` says why in the
-place it decides: *a provider bump is the last change that should land without a plan.*
+change under `modules/` other than the module's README as shared across environments — so it
+selects every environment and there is a real plan to run, against real state, with an OIDC
+role. `plan.yml` says why in the place it decides: *a provider bump is the last change that
+should land without a plan.*
 
 Create a fine-grained PAT or a GitHub App installation token scoped to this repository with
 `contents: write` and `pull-requests: write`, and store it as a repository secret:
