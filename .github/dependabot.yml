@@ -69,14 +69,30 @@
 # discovered, because on a public repository it is a choice and not a default
 # anybody inherits.
 #
-# The overlap worth knowing before changing it: for the one ecosystem here,
-# alerts would report on the same GitHub Advisory data that zizmor's
-# `known-vulnerable-actions` audit reads in `make audit-online`. The
-# difference is when. `audit-online` runs on pull requests, so it answers when
-# somebody is already changing something; an alert arrives on the day the
-# advisory is published, against a repository nobody is touching. Those are
-# different guarantees, and this file does not pretend the first is the
-# second.
+# Alerts stay off on purpose, and the reason is narrower than "not yet". An
+# earlier version of this passage argued that alerts and zizmor's
+# `known-vulnerable-actions` audit read the same GitHub Advisory data and
+# differ only in when they answer — the audit on a pull request, an alert on
+# the day the advisory is published against a repository nobody is touching.
+# The second half of that was never true here. GitHub's own page on Dependabot
+# alerts says it in one sentence: "For GitHub Actions, alerts are only
+# generated for actions that use semantic versioning, not SHA versioning."
+# Every `uses:` in this repository is a full commit SHA (rule 1), so the set
+# of dependencies an alert could match is empty, and there is nothing else for
+# it to read: `.terraform.lock.hcl` is not an ecosystem alerts cover, no
+# package.json or go.mod exists, and the dependency-graph SBOM endpoint
+# answers 404 for this repository (measured — the graph is off, and the PUT
+# below would switch it on to index the same nothing). Switching alerts on
+# would add a control that reads green because it examined nothing. zizmor is
+# the one of the two that actually operates, because `known-vulnerable-actions`
+# resolves a SHA pin to the longest tag on that commit before it queries the
+# advisory database — and the `audit-online` job in validate.yml runs it,
+# through `make audit-online`, on every pull request. Not as a required check:
+# that job goes red beside a merge button that still works, for the reason the
+# Makefile's `audit-online` target gives. Three things would change this
+# answer: an action pinned by tag, GitHub lifting the SHA limitation, or a
+# covered manifest arriving. At that point enabling is one call:
+# `gh api --method PUT repos/isai2105/terraform-aws-static-site/vulnerability-alerts`.
 
 version: 2
 
