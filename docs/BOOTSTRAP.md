@@ -385,7 +385,10 @@ Push protection is the only control in this repository that can be correct from 
 push: it is server-side, it cannot be skipped with `--no-verify`, and it blocks the push rather
 than reporting after the fact. `bootstrap/terraform.tfvars` and every `envs/*/terraform.tfvars`
 are committed on the understanding that they hold no secrets; this is the backstop for the day
-that stops being true.
+that stops being true. Dependabot alerts, on the same settings page as these two, are
+deliberately left off: GitHub generates them for Actions only when the pin is a version tag,
+every `uses:` here is a commit SHA, and the argument is made in full in
+`.github/dependabot.yml`.
 
 `allow_auto_merge` is not cosmetic. Every commit from the third onward lands through
 `gh pr create --fill && gh pr merge --squash --auto`, and with the setting off that second
