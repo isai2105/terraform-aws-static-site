@@ -345,8 +345,22 @@ INVALIDATION_ID="$(aws cloudfront create-invalidation \
 
 **The order is the deploy's only concurrency control.** Every asset the new `index.html`
 references exists in the bucket before anything serves that `index.html`. Reverse steps 1 and 3
-and there is a window — as long as the asset upload takes — in which a viewer receives a
-document referencing chunks that are not there yet, and gets the origin's `403` for each of them.
+and a viewer can receive a document referencing chunks that are not there yet, and get the
+origin's `403` for each of them — and that refusal outlives the upload. Answered under the
+assets behaviour, it carries that policy's `cache-control: public, max-age=31536000, immutable`
+(section 4.2), and a Chromium browser holds a `403` carrying an explicit `max-age` for that long
+without asking again; Firefox revalidates it. The edge does not hold it — CloudFront caches a
+`403` only when the origin's own response carries a `max-age`, and S3's refusal carries none —
+so the next viewer is fine and the one who arrived early is not, for up to a year, at the only
+URL that will ever serve that build's chunk. What keeps this unreachable is the ordering rather
+than the brevity of the window: a failed step 1 must never be followed by a hand-run step 3,
+because the document step 3 uploads is the only thing that can send a browser to a chunk the
+bucket lacks — a document held across a teardown cannot, because the hostname it names dies
+with the environment (section 8). Anything else that lets a live `index.html` name an absent
+chunk — dropping this ordering, adding `--delete` to step 1, a per-environment build whose
+document names chunks a different build produced, or a custom domain, which keeps the hostname
+stable across a teardown so a tab left open through a destroy and re-apply asks the fresh
+bucket for the old build's chunks — reopens the decision to leave the header on the `403`.
 
 **No `--delete` on either sync.** That is section 5, and it is a decision rather than an
 omission.
@@ -411,10 +425,14 @@ assertions may expect, and every one of them is measured rather than predicted:
 - **A hashed asset carries `cache-control: public, max-age=31536000, immutable`**, and the
   document carries `cache-control: no-cache`. These come from the response headers policies, not
   from anything the deploy uploads.
-- **Whether the response headers survive the forwarded 403 is an open question**, recorded in
-  `modules/static-site/README.md` and printed but never asserted by this repository's end-to-end
-  workflow. Do not build an assertion on it in either direction: one observation is not a
-  contract.
+- **The response headers survive the forwarded `403`.** A request for
+  `/assets/does-not-exist.js` has come back `403` carrying
+  `cache-control: public, max-age=31536000, immutable` on every green run of this repository's
+  end-to-end workflow since the error mapping was removed, beginning with run 33423275433 on
+  2026-08-31. The workflow prints that header and does not assert on it, and nothing else does.
+  Do not build an assertion on it in either direction: it is something this repository prints
+  and does not promise. What a browser does with it, and why the deploy ordering keeps the case
+  unreachable, is section 4.1.
 
 One residual belongs in the app repository's own tests rather than here: **a route whose last
 path segment contains a dot is not rewritten.** `/users/jane.doe` is read as a request for a
