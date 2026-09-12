@@ -760,15 +760,37 @@ test: check-terraform ## Run the module tests with `terraform test`.
 # one, in the five places where the rationale is longest, and this repository
 # trades the other way.
 #
-# `secrets-outside-env` is the one item here worth revisiting on its own
+# `secrets-outside-env` was the one item here worth revisiting on its own
 # merits, and it is not only an audit. It asks for the token to live on a
 # GitHub Environment rather than on the repository, and an Environment with a
 # deployment branch policy of `main` would make that token unreadable from a
 # topic branch — structurally stronger than the ref check
 # provider-lock-refresh.yml performs in a `run:` block, which a modified copy
-# of that workflow on a branch could simply delete. It is not taken here
-# because it changes how the platform is bootstrapped rather than how it is
-# audited, and docs/BOOTSTRAP.md section 8 specifies a repository secret.
+# of that workflow on a branch could simply delete. It is not taken, and it
+# is recorded here as accepted rather than deferred, because the threat the
+# move defends against has been stated and, read off the repository's own
+# configuration, found empty. Reaching the secret from a topic branch takes
+# a push and a `workflow_dispatch` — that and `schedule` are the workflow's
+# only triggers, and it runs with no `id-token` and `contents: read` — and
+# the repository has one collaborator, who created the token in the first
+# place. What the token can do is bounded by the `main` ruleset (id
+# 21573105), whose `bypass_actors` list is empty and whose rules are
+# `pull_request`, `required_status_checks`, `non_fast_forward` and
+# `deletion`: a holder can open a pull request subject to every one of those,
+# and cannot reach `main` any other way — no direct push, no force-push, no
+# delete. So the only actor able to read the secret already holds everything
+# it grants. The move would also change nothing about where the token
+# actually goes, which is into the SHA-pinned `create-pull-request` step
+# either way (the preflight step reads it only to check it is set) — an
+# Environment governs who can read a secret, not what a step does once handed
+# one. Two things flip this. A second write-access collaborator combined with
+# a `required_approving_review_count` of one or more (it is zero today) makes
+# the move mandatory: a token read from a topic branch would then let one
+# person open a pull request and approve it as the other, which defeats the
+# review the count exists to buy. And any trigger on that workflow that runs
+# on untrusted input — `pull_request_target`, `issue_comment` — does the
+# same, because the push is then no longer the collaborator's to make.
+# docs/BOOTSTRAP.md section 8 still specifies a repository secret.
 #
 # A gate whose green depends on a list of suppressions is a gate nobody reads,
 # and one bought by shortening the reasoning is worse than that.
