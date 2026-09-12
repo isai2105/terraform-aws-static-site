@@ -70,11 +70,12 @@
 #
 # That is the general rule, and here it bites harder than usual. This pull
 # request touches `modules/static-site/.terraform.lock.hcl`, and plan.yml's
-# `detect` job treats any change under `modules/` as shared across
-# environments — so it selects every environment and requires a real plan
-# against real state. plan.yml says the reason out loud: "A provider bump is
-# the last change that should land without a plan." A pull request that can
-# never run that plan is the one shape this change must not take.
+# `detect` job treats any change under `modules/` other than the module's
+# README as shared across environments — so it selects every environment and
+# requires a real plan against real state. plan.yml says the reason out loud:
+# "A provider bump is the last change that should land without a plan." A pull
+# request that can never run that plan is the one shape this change must not
+# take.
 #
 # What that plan proves is narrower than "a real plan against real state"
 # sounds, and the first live run measured the gap. On the pull request run
@@ -578,7 +579,8 @@ jobs:
             - Each provider carries two `h1:` hashes, one per platform. One
               is a lock narrowed to whatever resolved first.
             - `plan-gate` is not enough on its own here. This diff touches
-              `modules/`, so plan.yml selects every environment and there is a
+              the module's lock file, which plan.yml treats as shared (only its
+              README is exempt), so it selects every environment and there is a
               real plan to read. Read it for what it can show: neither
               environment is applied, so both plan from empty state and a
               clean plan says the new provider builds the same resources from
